@@ -6,3 +6,4 @@ pem_files/
 nuclei.exe
 *.spec
 __pycache__/
+!docs/*.png
