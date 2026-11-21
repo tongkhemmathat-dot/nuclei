@@ -1,0 +1,8 @@
+dist/
+build/
+reports/
+nuclei-templates/
+pem_files/
+nuclei.exe
+*.spec
+__pycache__/
