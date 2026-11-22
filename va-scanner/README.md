@@ -116,6 +116,8 @@
 
 > สแกนแบบ TCP connect รอบเดียว 100 thread timeout 2 วินาที ไม่สแกน UDP ถ้าเป้าหมายมี IPS ที่ตัด connection เวลาสแกนถี่ บางพอร์ตอาจหลุด ให้สแกนซ้ำเพื่อยืนยัน
 
+![Ports](docs/ports.png)
+
 ## ตรวจ SSL/TLS และเกรด
 
 ติ๊กโมดูล **SSL/TLS** (การ์ดที่มีชุด ssl จะติ๊กให้อัตโนมัติ) ตรวจได้เฉพาะเป้าหมาย `https://` หรือ `host:port` และใช้เวลาประมาณ 30–60 วินาทีต่อ host
@@ -172,6 +174,8 @@
 | Other | CORS `Access-Control-Allow-Origin: *`, BREACH (HTTP compression) |
 
 การทดสอบ X-Forwarded-Host injection จะส่ง header `X-Forwarded-Host: va-scanner-probe.invalid` ไปด้วย ถ้าค่านี้สะท้อนกลับมาใน header หรือหน้าเว็บ แปลว่าเสี่ยง cache poisoning / password-reset poisoning ไม่มีการส่ง payload อื่น
+
+![HTTP Headers](docs/headers.png)
 
 ## รายงาน HTML
 
