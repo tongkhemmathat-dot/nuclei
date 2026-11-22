@@ -32,25 +32,33 @@ SEV_TH = {"info": "ข้อมูล", "low": "ต่ำ", "medium": "กลา
 SEV_COLOR = {"critical": "#7b1fa2", "high": "#d32f2f", "medium": "#f57c00", "low": "#1976d2", "info": "#607d8b"}
 STATUS_COLOR = {"OK": "#2e7d32", "INFO": "#555555", **{s.upper(): c for s, c in SEV_COLOR.items()}}  # TLS table
 NOINFO = ["low", "medium", "high", "critical"]
-# preset -> (template sets, severities, tags, description). Tags filter the sets (set AND tag).
+# Modules run independently, in this order: nuclei templates, then each extra module.
+MODULES = {"ports": "Port scan / สแกนพอร์ต", "tls": "SSL/TLS (testssl-style)", "headers": "HTTP headers / ตรวจ header"}
+# preset -> (template sets, severities, tags, description, modules). Tags filter the sets (set AND tag).
 PRESETS = {
     "Quick Scan / ตรวจเร็ว": (["technologies", "ssl", "misconfiguration"], NOINFO, "",
-                              "ปลอดภัย · ตรวจพื้นฐาน เทคโนโลยี SSL การตั้งค่า (~5 นาที)"),
+                              "ปลอดภัย · ตรวจพื้นฐาน เทคโนโลยี SSL การตั้งค่า header (~5 นาที)", {"tls", "headers"}),
     "Standard VA / ตรวจมาตรฐาน": (
         ["technologies", "misconfiguration", "exposures", "exposed-panels", "ssl", "takeovers"], NOINFO, "",
-        "ปลอดภัย · แนะนำสำหรับงาน VA เว็บทั่วไป"),
+        "ปลอดภัย · แนะนำสำหรับงาน VA เว็บทั่วไป", {"tls", "headers"}),
     "Network / ตรวจเครือข่าย": (
         ["dns", "ssl", "network-detection", "network-misconfig", "network-exposures"], NOINFO, "",
-        "ปลอดภัย · DNS, SSL, บริการ/พอร์ตบนเซิร์ฟเวอร์"),
+        "ปลอดภัย · สแกนพอร์ต DNS SSL บริการบนเซิร์ฟเวอร์", {"ports", "tls"}),
     "Asset Discovery / สำรวจระบบ": (["technologies", "exposed-panels", "network-detection"], SEVS, "",
-                                    "ปลอดภัย · ทำบัญชีว่าเป้าหมายใช้อะไรบ้าง (รวม info)"),
+                                    "ปลอดภัย · ทำบัญชีว่าเป้าหมายใช้อะไรบ้าง (รวม info)", {"ports", "headers"}),
+    "Port Scan / สแกนพอร์ต": ([], SEVS, "", "ปลอดภัย · TCP connect scan + banner, ชี้พอร์ตเสี่ยง (RDP SMB DB)", {"ports"}),
+    "testssl.sh only / เฉพาะ testssl": ([], SEVS, "", "ปลอดภัย · ไม่รัน nuclei: โปรโตคอล cipher ใบรับรอง ช่องโหว่ TLS + HTTP header",
+                                        {"tls", "headers"}),
+    "SSL/TLS / ตรวจ SSL/TLS": (["ssl"], SEVS, "", "ปลอดภัย · แบบ testssl.sh: โปรโตคอล cipher ใบรับรอง Heartbleed ROBOT", {"tls"}),
+    "HTTP Headers / ตรวจ Header": ([], SEVS, "", "ปลอดภัย · security header, banner, X-Forwarded, cookie, BREACH",
+                                   {"headers"}),
     "KEV / ช่องโหว่ที่ถูกโจมตีจริง": (["cves (intrusive)", "network-cves (intrusive)"], NOINFO, "kev",
-                                      "INTRUSIVE · CVE ที่มีรายงานการโจมตีจริง ต้องให้หัวหน้าอนุมัติ"),
+                                      "INTRUSIVE · CVE ที่มีรายงานการโจมตีจริง ต้องให้หัวหน้าอนุมัติ", set()),
     "WordPress / ตรวจ WordPress": (
         ["technologies", "misconfiguration", "exposures", "cves (intrusive)", "vulnerabilities (intrusive)"],
-        NOINFO, "wordpress,wp-plugin", "INTRUSIVE · ปลั๊กอินและธีมที่มีช่องโหว่ ต้องให้หัวหน้าอนุมัติ"),
-    "SSL/TLS / ตรวจ SSL/TLS": (["ssl"], SEVS, "", "ปลอดภัย · แบบ testssl.sh: โปรโตคอล cipher ใบรับรอง Heartbleed ROBOT"),
-    "Full Scan / ตรวจเต็ม": (list(CATS), NOINFO, "", "INTRUSIVE · ทุกชุดการตรวจ ใช้เวลานาน ต้องให้หัวหน้าอนุมัติ"),
+        NOINFO, "wordpress,wp-plugin", "INTRUSIVE · ปลั๊กอินและธีมที่มีช่องโหว่ ต้องให้หัวหน้าอนุมัติ", {"headers"}),
+    "Full Scan / ตรวจเต็ม": (list(CATS), NOINFO, "", "INTRUSIVE · ทุกชุดการตรวจ ใช้เวลานาน ต้องให้หัวหน้าอนุมัติ",
+                             set(MODULES)),
 }
 DEFAULT_PRESET = "Standard VA / ตรวจมาตรฐาน"
 
@@ -102,6 +110,10 @@ TLS_ISSUES = {
     "cert-expiring": ("low", "Certificate expires within 30 days", "ใบรับรองใกล้หมดอายุ", "ต่ออายุใบรับรอง"),
     "cert-weak-key": ("medium", "Certificate key too small", "public key สั้นกว่า 2048 บิต (RSA) / 256 บิต (EC)", "ออกใบรับรองใหม่ด้วยคีย์ที่ยาวขึ้น"),
     "cert-sha1": ("medium", "SHA-1 signed certificate chain", "ใบรับรองใช้ลายเซ็น SHA-1", "ออกใบรับรองใหม่ที่ใช้ SHA-256 ขึ้นไป"),
+    "beast": ("low", "BEAST (CVE-2011-3389)", "TLS 1.0/SSLv3 ใช้ CBC cipher เสี่ยง BEAST (browser รุ่นใหม่ป้องกันฝั่ง client แล้ว)",
+              "ปิด TLS 1.0 และ SSLv3"),
+    "lucky13": ("low", "LUCKY13 (CVE-2013-0169)", "ใช้ CBC cipher อาจถูกโจมตีแบบ timing (potentially vulnerable)",
+                "ใช้ AEAD (GCM / CHACHA20) หรือ TLS 1.3 และจัดลำดับ CBC ไว้ท้าย"),
     "no-hsts": ("low", "HSTS header missing", "ไม่มี Strict-Transport-Security", "เพิ่ม header Strict-Transport-Security"),
     "summary": ("info", "TLS configuration summary", "สรุปโปรโตคอลและใบรับรอง", ""),
 }
@@ -200,6 +212,23 @@ def tls_findings(host, port, scan):
         else:
             row(V, label, "VULNERABLE" if proto in protos else "not vulnerable (OK)",
                 TLS_ISSUES["ssl2" if proto == "SSLv2" else "ssl3"][0].upper() if proto in protos else "OK")
+    # testssl.sh -U rows. SWEET32/FREAK/LOGJAM/RC4 mirror the cipher categories (finding already added there)
+    def mirror(label, hit, key, bad="VULNERABLE"):
+        row(V, label, f"{bad}: {', '.join(hit)}" if hit else "not vulnerable (OK)",
+            TLS_ISSUES[key][0].upper() if hit else "OK")
+    mirror("SWEET32 (CVE-2016-2183)", names(lambda c: any(t in c.cipher_suite.name for t in ("3DES", "DES_EDE", "IDEA"))), "des")
+    mirror("FREAK (CVE-2015-0204)", names(lambda c: "EXPORT" in c.cipher_suite.name and "_RSA_" in c.cipher_suite.name
+                                          and "DH" not in c.cipher_suite.name), "export")
+    mirror("LOGJAM (CVE-2015-4000)", names(lambda c: ("EXPORT" in c.cipher_suite.name and "DH" in c.cipher_suite.name)
+                                           or (weak_dh(c) and c.ephemeral_key.size <= 1024)), "weak-dh")
+    mirror("RC4 (CVE-2013-2566, CVE-2015-2808)", names(lambda c: "RC4" in c.cipher_suite.name), "rc4")
+    old_cbc = sorted({c.cipher_suite.name for lbl, acc in by_proto if lbl in ("SSLv3", "TLS 1.0")
+                      for c in acc if "CBC" in c.cipher_suite.name})
+    check(V, "BEAST (CVE-2011-3389)", "beast", bool(old_cbc) if by_proto else None,
+          f"VULNERABLE ({len(old_cbc)} CBC cipher(s) on SSLv3/TLS 1.0)", "not vulnerable (OK)", old_cbc)
+    cbc = names(lambda c: "CBC" in c.cipher_suite.name)
+    check(V, "LUCKY13 (CVE-2013-0169)", "lucky13", bool(cbc) if by_proto else None,
+          f"potentially VULNERABLE ({len(cbc)} CBC cipher(s))", "not vulnerable (OK)", cbc)
     if ed:
         row(V, "TLS 1.3 early data (0-RTT)", "supported (replay risk)" if ed.supports_early_data else "not supported (OK)",
             "LOW" if ed.supports_early_data else "OK")
@@ -420,6 +449,249 @@ def tls_scan(targets, log):
     return found, tables
 
 
+def finding(tid, where, sev, name, desc, fix, extracted=(), ref=()):
+    """One nuclei-shaped finding, so every module shows up in Vulnerabilities / Hosts / HTML the same way."""
+    return {"template-id": tid, "host": where, "matched-at": where, "extracted-results": list(extracted), "type": "va",
+            "info": {"name": name, "severity": sev, "description": desc, "remediation": fix, "reference": list(ref)}}
+
+
+def target_host(t):
+    from urllib.parse import urlsplit
+    return urlsplit(t if "://" in t else "//" + t).hostname
+
+
+# ---------- Port scan ----------
+# port -> (service, severity when exposed to the internet, why)
+PORTS = {
+    21: ("FTP", "medium", "FTP ส่งรหัสผ่านแบบไม่เข้ารหัส ใช้ SFTP/FTPS แทน"), 22: ("SSH", "info", "จำกัด IP และใช้ key แทนรหัสผ่าน"),
+    23: ("Telnet", "high", "Telnet ไม่เข้ารหัส ควรปิด"), 25: ("SMTP", "info", "ตรวจว่าไม่เป็น open relay"),
+    53: ("DNS", "info", "ตรวจว่าไม่เปิด recursion ให้ภายนอก"), 80: ("HTTP", "info", "ควร redirect ไป HTTPS"),
+    81: ("HTTP-alt", "info", "พอร์ตเว็บเสริม"), 110: ("POP3", "low", "ไม่เข้ารหัส ใช้ POP3S"), 111: ("RPCbind", "medium", "ไม่ควรเปิดออก Internet"),
+    135: ("MS-RPC", "high", "Windows RPC ไม่ควรเปิดออก Internet"), 139: ("NetBIOS", "high", "Windows file sharing ไม่ควรเปิดออก Internet"),
+    143: ("IMAP", "low", "ไม่เข้ารหัส ใช้ IMAPS"), 389: ("LDAP", "medium", "directory service ไม่ควรเปิดออก Internet"),
+    443: ("HTTPS", "info", "เว็บ HTTPS"), 445: ("SMB", "high", "SMB ถูกใช้โดย ransomware/EternalBlue ไม่ควรเปิดออก Internet"),
+    465: ("SMTPS", "info", "mail submission"), 502: ("Modbus", "high", "ICS/SCADA ไม่ควรเปิดออก Internet"),
+    587: ("SMTP-sub", "info", "mail submission"), 636: ("LDAPS", "medium", "directory service ไม่ควรเปิดออก Internet"),
+    873: ("rsync", "medium", "อาจเข้าถึงไฟล์ได้โดยไม่ยืนยันตัวตน"), 993: ("IMAPS", "info", "mail"), 995: ("POP3S", "info", "mail"),
+    1433: ("MSSQL", "high", "ฐานข้อมูลไม่ควรเปิดออก Internet"), 1521: ("Oracle", "high", "ฐานข้อมูลไม่ควรเปิดออก Internet"),
+    1723: ("PPTP", "medium", "PPTP VPN เข้ารหัสอ่อน"), 2049: ("NFS", "high", "แชร์ไฟล์ไม่ควรเปิดออก Internet"),
+    2082: ("cPanel", "medium", "หน้าแอดมิน hosting"), 2083: ("cPanel-SSL", "medium", "หน้าแอดมิน hosting"),
+    2086: ("WHM", "medium", "หน้าแอดมิน hosting"), 2087: ("WHM-SSL", "medium", "หน้าแอดมิน hosting"),
+    2375: ("Docker API", "critical", "Docker API ไม่มีรหัส = ยึดเครื่องได้ทันที"), 2376: ("Docker TLS", "medium", "Docker API"),
+    3000: ("HTTP-dev", "info", "พอร์ตเว็บ/dev"), 3306: ("MySQL", "high", "ฐานข้อมูลไม่ควรเปิดออก Internet"),
+    3389: ("RDP", "high", "RDP ถูก brute-force และใช้ปล่อย ransomware บ่อยที่สุด ให้เข้าผ่าน VPN"),
+    5000: ("HTTP-alt", "info", "พอร์ตเว็บเสริม"), 5432: ("PostgreSQL", "high", "ฐานข้อมูลไม่ควรเปิดออก Internet"),
+    5601: ("Kibana", "medium", "dashboard อาจไม่มีรหัส"), 5672: ("AMQP", "low", "message queue"),
+    5900: ("VNC", "high", "remote desktop มักใช้รหัสอ่อน"), 5985: ("WinRM", "medium", "Windows remote management"),
+    5986: ("WinRM-SSL", "medium", "Windows remote management"), 6379: ("Redis", "high", "Redis มักไม่มีรหัส ยึดเครื่องได้"),
+    6443: ("Kubernetes API", "medium", "cluster API"), 7001: ("WebLogic", "medium", "มีประวัติ RCE หลายตัว"),
+    8000: ("HTTP-alt", "info", "พอร์ตเว็บเสริม"), 8009: ("AJP", "high", "Ghostcat (CVE-2020-1938)"),
+    8080: ("HTTP-proxy", "info", "พอร์ตเว็บเสริม ตรวจว่าเป็นหน้าแอดมินหรือไม่"), 8081: ("HTTP-alt", "info", "พอร์ตเว็บเสริม"),
+    8443: ("HTTPS-alt", "info", "พอร์ตเว็บเสริม"), 8888: ("HTTP-alt", "info", "พอร์ตเว็บเสริม"), 9000: ("HTTP-alt", "info", "พอร์ตเว็บเสริม"),
+    9090: ("HTTP-alt", "info", "พอร์ตเว็บเสริม"), 9200: ("Elasticsearch", "high", "ข้อมูลอาจอ่านได้โดยไม่มีรหัส"),
+    10000: ("Webmin", "medium", "หน้าแอดมิน server"), 10250: ("Kubelet", "high", "อาจสั่งรันคำสั่งใน container ได้"),
+    11211: ("Memcached", "high", "ไม่มีรหัส และใช้ทำ DDoS amplification"), 15672: ("RabbitMQ mgmt", "medium", "หน้าแอดมิน"),
+    27017: ("MongoDB", "high", "ฐานข้อมูลไม่ควรเปิดออก Internet"), 47001: ("WinRM", "medium", "Windows remote management"),
+    **{p: ("MS-RPC dyn", "medium", "Windows RPC dynamic port ไม่ควรเปิดออก Internet") for p in range(49152, 49158)},
+}
+
+
+def parse_ports(spec):
+    """'top' / 'all' / '21,80,8000-8100' (mixable: 'top,8081') -> sorted ports. Raises ValueError on bad input."""
+    out = set()
+    for part in (spec or "top").replace(" ", "").lower().split(","):
+        if part in ("top", ""):
+            out |= set(PORTS)
+        elif part == "all":
+            out |= set(range(1, 65536))
+        else:
+            a, _, b = part.partition("-")
+            a, b = int(a), int(b or a)
+            if not 1 <= a <= b <= 65535:
+                raise ValueError(f"bad port range: {part}")
+            out |= set(range(a, b + 1))
+    return sorted(out)
+
+
+def port_scan(targets, spec, log, stopped=lambda: False):
+    """TCP connect scan + first-line banner. Returns (findings, {host: [port rows]})."""
+    import socket
+    from concurrent.futures import ThreadPoolExecutor
+    ports = parse_ports(spec)
+    hosts = []
+    for h in dict.fromkeys(filter(None, map(target_host, targets))):
+        try:
+            socket.getaddrinfo(h, None); hosts.append(h)
+        except OSError:
+            log(f"[ports] cannot resolve {h}\n")
+
+    def probe(hp):
+        if stopped():
+            return None
+        try:
+            with socket.create_connection(hp, timeout=2) as s:
+                s.settimeout(1.5)
+                try:
+                    b = s.recv(256)
+                except OSError:
+                    b = b""
+        except OSError:
+            return None
+        text = "".join(ch if ch.isprintable() else " " for ch in b.decode("latin-1"))
+        return hp, " ".join(text.split())[:160]
+
+    # ponytail: one pass, 100 threads, 2s timeout. An IPS that drops bursts can hide ports; re-run to confirm.
+    log(f"[ports] {len(hosts)} host(s) x {len(ports)} port(s) ...\n")
+    with ThreadPoolExecutor(100) as ex:
+        hits = [r for r in ex.map(probe, [(h, p) for h in hosts for p in ports]) if r]
+    found, tables = [], {h: [] for h in hosts}
+    for (h, p), banner in sorted(hits):
+        svc, sev, why = PORTS.get(p, ("unknown", "info", "พอร์ตเปิด ตรวจว่าจำเป็นต้องเปิดหรือไม่"))
+        tables[h].append({"port": p, "service": svc, "banner": banner, "severity": sev, "note": why})
+        found.append(finding(f"port-{p}", f"{h}:{p}", sev, f"{svc} exposed ({p}/tcp)", f"พอร์ต {p}/tcp ({svc}) เปิดอยู่: {why}",
+                             "ปิดพอร์ตที่ firewall หรือจำกัด IP ที่เข้าถึงได้ / ให้เข้าผ่าน VPN" if sev != "info" else "",
+                             [banner] if banner else []))
+        log(f"[ports] {h}:{p} open {svc} {banner}\n")
+    return found, tables
+
+
+# ---------- HTTP headers (testssl.sh -h style) ----------
+HDR_ISSUES = {
+    "hsts": ("low", "HSTS header missing", "ไม่มี Strict-Transport-Security เสี่ยง SSL stripping", "เพิ่ม Strict-Transport-Security: max-age=31536000; includeSubDomains"),
+    "csp": ("low", "Content-Security-Policy missing", "ไม่มี CSP ช่วยลดผลกระทบ XSS", "กำหนด Content-Security-Policy"),
+    "xfo": ("low", "Clickjacking protection missing", "ไม่มี X-Frame-Options หรือ CSP frame-ancestors", "เพิ่ม X-Frame-Options: DENY/SAMEORIGIN หรือ CSP frame-ancestors"),
+    "xcto": ("low", "X-Content-Type-Options missing", "ไม่มี X-Content-Type-Options: nosniff", "เพิ่ม X-Content-Type-Options: nosniff"),
+    "referrer": ("info", "Referrer-Policy missing", "ไม่ได้กำหนด Referrer-Policy", "เพิ่ม Referrer-Policy: strict-origin-when-cross-origin"),
+    "permissions": ("info", "Permissions-Policy missing", "ไม่ได้กำหนด Permissions-Policy", "กำหนด Permissions-Policy"),
+    "server-version": ("low", "Server banner discloses version", "header Server เปิดเผยชื่อ/เวอร์ชันซอฟต์แวร์", "ซ่อนเวอร์ชันใน header Server"),
+    "tech-banner": ("low", "Application banner disclosed", "header เปิดเผยเทคโนโลยี/เวอร์ชัน (X-Powered-By, X-AspNet-Version ...)", "ลบ header เหล่านี้ออก"),
+    "proxy-banner": ("info", "Reverse proxy / X-Forwarded headers disclosed", "header จาก proxy/cache เปิดเผยโครงสร้างภายใน", "ลบ header ที่ proxy เพิ่มเข้ามาก่อนส่งให้ผู้ใช้"),
+    "internal-ip": ("low", "Internal IP address disclosed in headers", "header เปิดเผย IP ภายในองค์กร", "ลบ/แก้ header ที่มี IP ภายใน"),
+    "xfh-reflect": ("medium", "Host header injection (X-Forwarded-Host reflected)", "ค่า X-Forwarded-Host ที่ส่งไปถูกสะท้อนกลับ เสี่ยง cache poisoning / password-reset poisoning",
+                    "ไม่เชื่อ X-Forwarded-Host จากผู้ใช้ ใช้ชื่อโดเมนที่ตั้งค่าไว้"),
+    "cookie-flags": ("low", "Cookie without Secure / HttpOnly / SameSite", "cookie ไม่ได้ตั้ง flag ป้องกัน", "ตั้ง Secure; HttpOnly; SameSite ให้ cookie"),
+    "cors": ("low", "CORS allows any origin", "Access-Control-Allow-Origin: *", "จำกัด origin ที่อนุญาต"),
+    "breach": ("low", "HTTP compression (BREACH, CVE-2013-3587)", "เปิด HTTP compression อาจเสี่ยง BREACH หากหน้ามี secret", "ปิด compression สำหรับหน้าที่มี token/secret"),
+}
+TECH_HEADERS = ("x-powered-by", "x-aspnet-version", "x-aspnetmvc-version", "x-generator", "x-runtime", "x-version", "x-owa-version")
+PROXY_HEADERS = ("via", "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto", "x-forwarded-server", "x-real-ip",
+                 "x-cache", "x-cache-hits", "x-varnish", "x-served-by", "x-backend-server", "x-proxy-cache", "x-upstream")
+PROBE_HOST = "va-scanner-probe.invalid"
+
+
+def header_findings(url, status, hdrs, cookies, reflected, compressed):
+    """hdrs: {lowercase name: value}. Returns (findings, testssl-style rows)."""
+    import re
+    out, rows = [], [("Response", "HTTP status", str(status), "INFO")]
+    if hdrs.get("location"):
+        rows.append(("Response", "Location", hdrs["location"], "INFO"))
+
+    def add(key, extracted=()):
+        sev, name, desc, fix = HDR_ISSUES[key]
+        out.append(finding(f"hdr-{key}", url, sev, name, desc, fix, extracted, ["https://owasp.org/www-project-secure-headers/"]))
+
+    def check(sec, label, key, bad, bad_text, good_text, extracted=()):
+        if bad:
+            add(key, extracted)
+        rows.append((sec, label, bad_text if bad else good_text, HDR_ISSUES[key][0].upper() if bad else "OK"))
+
+    S, csp = "Security headers", hdrs.get("content-security-policy", "")
+    if url.startswith("https"):
+        h = hdrs.get("strict-transport-security", "")
+        check(S, "Strict-Transport-Security", "hsts", not h, "not offered", f"{h} (OK)")
+    check(S, "Content-Security-Policy", "csp", not csp, "not offered", f"{csp[:200]} (OK)")
+    xfo = hdrs.get("x-frame-options", "")
+    check(S, "X-Frame-Options / frame-ancestors", "xfo", not xfo and "frame-ancestors" not in csp, "not offered",
+          f"{xfo or 'CSP frame-ancestors'} (OK)")
+    x = hdrs.get("x-content-type-options", "")
+    check(S, "X-Content-Type-Options", "xcto", x.lower() != "nosniff", x or "not offered", "nosniff (OK)")
+    for name, key in (("Referrer-Policy", "referrer"), ("Permissions-Policy", "permissions")):
+        v = hdrs.get(name.lower(), "")
+        check(S, name, key, not v, "not offered", f"{v} (OK)")
+    if "x-xss-protection" in hdrs:
+        rows.append((S, "X-XSS-Protection", hdrs["x-xss-protection"] + " (deprecated, CSP preferred)", "INFO"))
+
+    B, srv = "Banners", hdrs.get("server", "")
+    check(B, "Server", "server-version", bool(re.search(r"\d", srv)), srv, f"{srv or '(empty / hidden)'} (OK)", [f"Server: {srv}"])
+    tech = [f"{h}: {hdrs[h]}" for h in TECH_HEADERS if hdrs.get(h)]
+    check(B, "Application banner", "tech-banner", bool(tech), "; ".join(tech), "none disclosed (OK)", tech)
+
+    P = "Reverse proxy / X-Forwarded"
+    prox = [f"{h}: {hdrs[h]}" for h in PROXY_HEADERS if hdrs.get(h)]
+    check(P, "Proxy / cache headers", "proxy-banner", bool(prox), "; ".join(prox), "none disclosed (OK)", prox)
+    priv = re.findall(r"\b(?:10|127|192\.168|172\.(?:1[6-9]|2\d|3[01]))(?:\.\d{1,3}){2,3}\b", " ".join(hdrs.values()))
+    check(P, "Internal IP in headers", "internal-ip", bool(priv), ", ".join(sorted(set(priv))), "none (OK)", sorted(set(priv)))
+    check(P, f"X-Forwarded-Host injection ({PROBE_HOST})", "xfh-reflect", reflected, f"REFLECTED in {reflected}",
+          "not reflected (OK)", [f"reflected in {reflected}"] if reflected else [])
+
+    C = "Cookies"
+    if not cookies:
+        rows.append((C, "Set-Cookie", "no cookies set", "INFO"))
+    weak = []
+    for c in cookies:
+        name, attrs = c.split("=", 1)[0].strip(), c.lower()
+        miss = [f for f, ok in (("Secure", "; secure" in attrs or not url.startswith("https")),
+                                ("HttpOnly", "httponly" in attrs), ("SameSite", "samesite" in attrs)) if not ok]
+        rows.append((C, name, f"missing {', '.join(miss)}" if miss else "Secure; HttpOnly; SameSite (OK)", "LOW" if miss else "OK"))
+        if miss:
+            weak.append(f"{name}: missing {', '.join(miss)}")
+    if weak:
+        add("cookie-flags", weak)
+
+    O = "Other"
+    acao = hdrs.get("access-control-allow-origin", "")
+    check(O, "Access-Control-Allow-Origin", "cors", acao == "*", "* (any origin)", acao or "not set (OK)")
+    check(O, "BREACH (HTTP compression)", "breach", bool(compressed), f"potentially VULNERABLE, uses {compressed}",
+          "no HTTP compression (OK)", [f"Content-Encoding: {compressed}"] if compressed else [])
+    return out, rows
+
+
+def header_scan(targets, log):
+    """One GET per target (no redirects followed, like testssl.sh). Returns (findings, {url: {"rows": [...]}})."""
+    import gzip, ssl, urllib.error, urllib.request, zlib
+
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *a, **k):
+            return None
+    # ponytail: certificate is not verified here; the TLS module reports trust problems
+    opener = urllib.request.build_opener(NoRedirect, urllib.request.HTTPSHandler(context=ssl._create_unverified_context()))
+    found, tables = [], {}
+    for t in dict.fromkeys(targets):
+        url = t if "://" in t else "https://" + t
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (VA-Scanner)", "Accept-Encoding": "gzip, deflate",
+                                                   "X-Forwarded-Host": PROBE_HOST})
+        try:
+            try:
+                r = opener.open(req, timeout=15)
+            except urllib.error.HTTPError as e:  # 3xx/4xx/5xx still carry the headers we check
+                r = e
+            body, status = r.read(500000), r.code
+        except Exception as ex:
+            log(f"[headers] {url}: {ex}\n")
+            tables[url] = {"rows": [("Response", "HTTP request", f"failed: {ex}", "INFO")]}
+            continue
+        enc = (r.headers.get("Content-Encoding") or "").lower()
+        try:
+            body = gzip.decompress(body) if "gzip" in enc else zlib.decompress(body) if "deflate" in enc else body
+        except Exception:
+            pass
+        hdrs = {k.lower(): v.strip() for k, v in r.headers.items()}
+        where = [w for w, s in (("headers", " ".join(hdrs.values())), ("body", body.decode("latin-1"))) if PROBE_HOST in s]
+        f, rows = header_findings(url, status, hdrs, r.headers.get_all("Set-Cookie") or [], " + ".join(where), enc)
+        tables[url] = {"rows": rows}
+        found += f
+        log(f"[headers] {url}: HTTP {status}, {len(f)} issue(s)\n")
+    return found, tables
+
+
+def load_json(outdir, name):
+    try:
+        with open(os.path.join(outdir, name), encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return {}
+
+
 def load_tls(outdir):
     try:
         with open(os.path.join(outdir, "tls.json"), encoding="utf-8") as fh:
@@ -516,21 +788,33 @@ def make_html(outdir, targets, name="VA Scan"):
              f"</tr>{host_rows}</table>") if host_rows else ""
     tls = ""
     badge = lambda st, txt: f'<span class="st" style="background:{STATUS_COLOR.get(st, "#999")}">{e(txt)}</span>'
-    for loc, t in load_tls(outdir).items():  # testssl-style table per endpoint
+    def check_table(rows):  # testssl-style table: section bars + check / result / status
         body_rows, last = [], None
-        for sec, chk, result, st in t["rows"]:
+        for sec, chk, result, st in rows:
             if sec != last:
                 body_rows.append(f'<tr class="sec"><td colspan="3">{e(sec)}</td></tr>')
                 last = sec
             body_rows.append(f'<tr><td>{e(str(chk))}</td><td style="color:{STATUS_COLOR.get(st, "#222")}">{e(str(result))}</td>'
                              f'<td>{badge(st, st)}</td></tr>')
+        return f'<table class="tls"><tr><th>Check</th><th>Result</th><th>Status</th></tr>{"".join(body_rows)}</table>'
+
+    ports = "".join(f'<tr><td>{e(h)}</td><td>{p["port"]}</td><td>{e(p["service"])}</td><td>{badge(p["severity"].upper(), p["severity"])}'
+                    f'</td><td>{e(p["banner"])}</td><td>{e(p["note"])}</td></tr>'
+                    for h, ps in load_json(outdir, "ports.json").items()
+                    for p in sorted(ps, key=lambda p: (rank(p["severity"]), p["port"])))
+    if ports:
+        ports = (f'<h2>Open ports / พอร์ตที่เปิด</h2><table class="tls ciphers"><tr><th>Host</th><th>Port</th><th>Service</th>'
+                 f'<th>Risk</th><th>Banner</th><th>Note</th></tr>{ports}</table>')
+    hdrs = "".join(f"<h3>{e(u)}</h3>{check_table(t['rows'])}" for u, t in load_json(outdir, "headers.json").items())
+    if hdrs:
+        hdrs = f"<h2>HTTP headers (testssl-style)</h2>{hdrs}"
+    for loc, t in load_tls(outdir).items():  # testssl-style table per endpoint
         cl = t["ciphers"]
         crows = "".join(f'<tr><td>{e(c["protocol"])}</td><td>{e(c["name"])}</td><td>{e(c["openssl"])}</td>'
                         f'<td>{e(c["kx"])}</td><td>{c["bits"]}</td><td>{badge(c["status"], c["strength"])}</td></tr>' for c in cl)
         g = t["grade"].get("grade", "-")
         tls += (f'<h3><span class="grade" style="background:{GRADE_COLOR.get(g, "#757575")}">{e(g)}</span>{e(loc)}</h3>'
-                f'<table class="tls"><tr><th>Check</th><th>Result</th><th>Status</th></tr>{"".join(body_rows)}</table>'
-                + (f'<h4>Accepted cipher suites / cipher ที่เซิร์ฟเวอร์ยอมรับ ({len(cl)})</h4><table class="tls ciphers">'
+                + check_table(t["rows"]) + (f'<h4>Accepted cipher suites / cipher ที่เซิร์ฟเวอร์ยอมรับ ({len(cl)})</h4><table class="tls ciphers">'
                    f'<tr><th>Protocol</th><th>IANA name</th><th>OpenSSL name</th><th>Key exchange</th><th>Bits</th>'
                    f'<th>Strength</th></tr>{crows}</table>' if cl else ""))
     if tls:
@@ -551,7 +835,7 @@ text-align:center;border-radius:8px;padding:4px 10px;margin-right:12px;vertical-
 <h1>Vulnerability Assessment Report</h1>
 <p><b>{e(name)}</b> &middot; Scan time: {e(os.path.basename(outdir))} &middot; Findings: {len(rows)}</p>
 <p>Targets: {"<br>".join(e(t) for t in targets)}</p>
-<div class="cards">{cards}</div>{hosts}<h2>Vulnerabilities</h2>{body}{tls}</body></html>"""
+<div class="cards">{cards}</div>{hosts}<h2>Vulnerabilities</h2>{body}{ports}{tls}{hdrs}</body></html>"""
     path = os.path.join(outdir, "report.html")
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(page)
@@ -675,7 +959,9 @@ class App(tk.Tk):
             self.preset.set(m["preset"])
         for c, v in self.cat_vars.items(): v.set(c in m.get("cats", []))
         for s, v in self.sev_vars.items(): v.set(s in m.get("sevs", []))
-        self.tls.set(bool(m.get("tls")))
+        self.use_nuclei.set(m.get("nuclei", bool(m.get("cats"))))
+        for k, v in self.mod_vars.items(): v.set(bool(m.get(k)))
+        self.port_spec.delete(0, "end"); self.port_spec.insert(0, m.get("ports") or "top")
         self.tags.delete(0, "end"); self.tags.insert(0, m.get("tags", ""))
         self.auth.set(False)  # authorization must be re-confirmed for every run
         self.tabs.select(1)
@@ -692,7 +978,7 @@ class App(tk.Tk):
         ttk.Label(t, text="Scan template / เลือกรูปแบบการสแกน", font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(12, 4))
         cards = ttk.Frame(t); cards.pack(fill="x")
         self.preset = tk.StringVar(value=DEFAULT_PRESET)
-        for i, (p, (_, _, _, desc)) in enumerate(PRESETS.items()):
+        for i, (p, (_, _, _, desc, _)) in enumerate(PRESETS.items()):
             danger = desc.startswith("INTRUSIVE")
             tk.Radiobutton(cards, text=f"{p}\n{desc}", variable=self.preset, value=p, indicatoron=0,
                            command=self.apply_preset, width=34, height=3, wraplength=250, justify="left",
@@ -722,10 +1008,18 @@ class App(tk.Tk):
         self.rate = ttk.Spinbox(a, from_=1, to=150, width=6); self.rate.set(20); self.rate.grid(row=r + 1, column=3, sticky="w")
 
         self.bottom = ttk.Frame(t); self.bottom.pack(fill="x", pady=10)
-        self.tls = tk.BooleanVar()
-        ttk.Checkbutton(self.bottom, variable=self.tls,
-                        text="SSL/TLS deep check (testssl-style) / ตรวจ SSL/TLS ละเอียด: โปรโตคอล, cipher, ใบรับรอง, "
-                             "Heartbleed, ROBOT, CCS, CRIME, renegotiation, HSTS").pack(anchor="w", pady=(0, 4))
+        mf = ttk.LabelFrame(self.bottom, text="Modules / โมดูล (เลือกรันแยกกันได้)", padding=6); mf.pack(fill="x", pady=(0, 6))
+        self.use_nuclei = tk.BooleanVar()
+        ttk.Checkbutton(mf, variable=self.use_nuclei, text="Nuclei templates / ชุดตรวจ nuclei (ตาม template ด้านบน)").grid(
+            row=0, column=0, columnspan=3, sticky="w")
+        self.mod_vars = {k: tk.BooleanVar() for k in MODULES}
+        texts = {"ports": "Port scan / สแกนพอร์ต TCP + banner  ·  พอร์ต:",
+                 "tls": "SSL/TLS deep check (testssl-style): โปรโตคอล cipher ใบรับรอง Heartbleed ROBOT SWEET32 BEAST LUCKY13 RC4 ...",
+                 "headers": "HTTP headers (testssl -h): security headers, Server/X-Powered-By, X-Forwarded-*, cookie, CORS, BREACH"}
+        for i, k in enumerate(MODULES, 1):
+            ttk.Checkbutton(mf, variable=self.mod_vars[k], text=texts[k]).grid(row=i, column=0, sticky="w")
+        self.port_spec = ttk.Entry(mf, width=28); self.port_spec.insert(0, "top"); self.port_spec.grid(row=1, column=1, sticky="w")
+        ttk.Label(mf, text="top / all / 1-1024,3389", foreground="#666").grid(row=1, column=2, sticky="w", padx=6)
         self.auth = tk.BooleanVar()
         ttk.Checkbutton(self.bottom, text="I have written authorization / ได้รับอนุญาตเป็นลายลักษณ์อักษรให้ทดสอบเป้าหมายนี้แล้ว",
                         variable=self.auth).pack(anchor="w")
@@ -740,19 +1034,26 @@ class App(tk.Tk):
             self.adv.pack_forget()
 
     def apply_preset(self):
-        cats, sevs, tags, _ = PRESETS[self.preset.get()]
-        self.tls.set("ssl" in cats)
+        cats, sevs, tags, _, mods = PRESETS[self.preset.get()]
+        self.use_nuclei.set(bool(cats))
+        for k, v in self.mod_vars.items(): v.set(k in mods)
         self.tags.delete(0, "end"); self.tags.insert(0, tags)
         for c, v in self.cat_vars.items(): v.set(c in cats)
         for s, v in self.sev_vars.items(): v.set(s in sevs)
 
     def run(self):
         targets = [t.strip() for t in self.targets.get("1.0", "end").splitlines() if t.strip()]
-        cats = [c for c, v in self.cat_vars.items() if v.get()]
+        cats = [c for c, v in self.cat_vars.items() if v.get()] if self.use_nuclei.get() else []
         sevs = [s for s, v in self.sev_vars.items() if v.get()]
-        if not targets or not cats:
-            return messagebox.showwarning("VA Scanner", "กรุณาใส่เป้าหมายอย่างน้อย 1 รายการ และเลือกชุดการตรวจอย่างน้อย 1 ชุด\n"
-                                                        "Enter at least one target and pick at least one template set.")
+        mods = {k: v.get() for k, v in self.mod_vars.items()}
+        if not targets or not (cats or any(mods.values())):
+            return messagebox.showwarning("VA Scanner", "กรุณาใส่เป้าหมายอย่างน้อย 1 รายการ และเลือก nuclei template หรือโมดูลอย่างน้อย 1 อย่าง\n"
+                                                        "Enter at least one target and pick nuclei templates or a module.")
+        if mods["ports"]:
+            try:
+                parse_ports(self.port_spec.get())
+            except ValueError as ex:
+                return messagebox.showwarning("VA Scanner", f"รูปแบบพอร์ตไม่ถูกต้อง / Bad port list: {ex}")
         if not self.auth.get():  # trust boundary: no scan without confirmed authorization
             return messagebox.showwarning("VA Scanner", "กรุณายืนยันว่าได้รับอนุญาตให้ทดสอบเป้าหมายนี้แล้ว\n"
                                                         "Confirm you are authorized to test these targets.")
@@ -770,9 +1071,10 @@ class App(tk.Tk):
             fh.write("\n".join(targets))
         name = self.name.get().strip() or f"Scan {stamp}"
         write_meta(outdir, name=name, preset=self.preset.get(), targets=targets, cats=cats, sevs=sevs,
-                   tags=self.tags.get().strip(), rate=self.rate.get(), tls=self.tls.get(), status="running")
+                   tags=self.tags.get().strip(), rate=self.rate.get(), nuclei=bool(cats), tls=mods["tls"],
+                   headers=mods["headers"], ports=self.port_spec.get().strip() if mods["ports"] else "", status="running")
         self.name.delete(0, "end"); self.auth.set(False)
-        cmd = build_cmd(tfile, cats, sevs, self.tags.get().strip(), self.rate.get(), outdir)
+        cmd = build_cmd(tfile, cats, sevs, self.tags.get().strip(), self.rate.get(), outdir) if cats else None
         self.running_dir = outdir
         self.refresh_scans()
         self.show_results(outdir); self.tabs.select(2)
@@ -815,15 +1117,19 @@ class App(tk.Tk):
         self.hosts.pack(fill="both", expand=True)
         self.hosts.bind("<Double-1>", self.drill_host)
         ttk.Label(hf, text="ดับเบิลคลิกที่ host เพื่อดูช่องโหว่ของเครื่องนั้น / Double-click a host to see its vulnerabilities").pack(anchor="w")
+        # Ports: one row per open port, risky services coloured by severity
+        pf = ttk.Frame(self.sub); self.sub.add(pf, text=" Ports / พอร์ต ")
+        cols = (("host", "Host", 170), ("port", "Port", 60), ("service", "Service", 110), ("risk", "Risk / ความเสี่ยง", 90),
+                ("banner", "Banner", 330), ("note", "Note / หมายเหตุ", 360))
+        self.portv = ttk.Treeview(pf, columns=[c[0] for c in cols], show="headings")
+        for cid, txt, w in cols:
+            self.portv.heading(cid, text=txt); self.portv.column(cid, width=w, anchor="center" if cid in ("port", "risk") else "w")
+        for s in SEVS:
+            self.portv.tag_configure(s, foreground=SEV_COLOR[s])
+        self.port_lbl = ttk.Label(pf, text=""); self.port_lbl.pack(anchor="w")
+        self.portv.pack(fill="both", expand=True)
         # SSL/TLS: testssl-style table, host -> section -> check rows
-        self.tlsv = ttk.Treeview(self.sub, columns=("result", "status"), show="tree headings")
-        self.tlsv.heading("#0", text="Check / รายการตรวจ"); self.tlsv.column("#0", width=330)
-        self.tlsv.heading("result", text="Result / ผล"); self.tlsv.column("result", width=660)
-        self.tlsv.heading("status", text="Status"); self.tlsv.column("status", width=90, anchor="center")
-        for st, c in STATUS_COLOR.items():
-            self.tlsv.tag_configure(st, foreground=c)
-        self.tlsv.tag_configure("sec", background="#e3e8ec", font=("Segoe UI", 9, "bold"))
-        self.sub.add(self.tlsv, text=" SSL/TLS ")
+        self.tlsv = self.check_tree(" SSL/TLS ")
         # Ciphers: every accepted cipher suite, sortable (like testssl -E)
         cf = ttk.Frame(self.sub); self.sub.add(cf, text=" Ciphers ")
         cols = (("host", "Host", 140), ("proto", "Protocol", 70), ("iana", "IANA name", 330), ("openssl", "OpenSSL name", 230),
@@ -837,6 +1143,7 @@ class App(tk.Tk):
         sb = ttk.Scrollbar(cf, orient="vertical", command=self.ciph.yview); self.ciph.configure(yscrollcommand=sb.set)
         self.ciph_lbl = ttk.Label(cf, text=""); self.ciph_lbl.pack(anchor="w")
         sb.pack(side="right", fill="y"); self.ciph.pack(fill="both", expand=True)
+        self.hdrv = self.check_tree(" HTTP Headers ")
         # Raw log
         self.log = scrolledtext.ScrolledText(self.sub, font=("Consolas", 9)); self.sub.add(self.log, text=" Log ")
 
@@ -846,21 +1153,29 @@ class App(tk.Tk):
             self.log.delete("1.0", "end")
             if outdir != self.running_dir and os.path.exists(os.path.join(outdir, "scan.log")):
                 self.log.insert("end", open(os.path.join(outdir, "scan.log"), encoding="utf-8", errors="replace").read())
-        tables = load_tls(outdir)
-        if outdir != self.shown_dir or len(self.tlsv.get_children()) != len(tables):
-            self.tlsv.delete(*self.tlsv.get_children())
+        # module tables only change when their file is (re)written, so rebuild on mtime, not every tick
+        stamp = tuple(os.path.getmtime(p) if os.path.exists(p) else 0
+                      for p in (os.path.join(outdir, n) for n in ("tls.json", "ports.json", "headers.json")))
+        if outdir != self.shown_dir or stamp != getattr(self, "_stamp", None):
+            self._stamp = stamp
+            tables = load_tls(outdir)
             self.ciph.delete(*self.ciph.get_children())
+            self.fill_check_tree(self.tlsv, {
+                loc: (f"{loc}    Grade {t['grade'].get('grade', '-')}",
+                      f"Grade / เกรด: {t['grade'].get('grade', '-')}" + (
+                          f"  (ถ้าใบรับรองน่าเชื่อถือ = {t['grade']['grade_ignoring_trust']})" if t["grade"].get("grade") == "T" else ""),
+                      GRADE_STATUS.get(t["grade"].get("grade", "-"), "INFO"), t["rows"]) for loc, t in tables.items()})
+            self.fill_check_tree(self.hdrv, {u: (u, "", "INFO", t["rows"]) for u, t in load_json(outdir, "headers.json").items()})
+            self.portv.delete(*self.portv.get_children())
+            ports = load_json(outdir, "ports.json")
+            for h, ps in ports.items():
+                for p in sorted(ps, key=lambda p: (rank(p["severity"]), p["port"])):
+                    self.portv.insert("", "end", tags=(p["severity"],), values=(
+                        h, p["port"], p["service"], p["severity"].upper(), p["banner"], p["note"]))
+            n = len(self.portv.get_children())
+            self.port_lbl.config(text=f"{n} open port(s) on {len(ports)} host(s) / พอร์ตที่เปิด" if ports else
+                                 "Port scan not run for this scan / สแกนนี้ไม่ได้เลือกโมดูลสแกนพอร์ต")
             for loc, t in tables.items():
-                g = t["grade"].get("grade", "-")
-                gs = GRADE_STATUS.get(g, "INFO")
-                h = self.tlsv.insert("", "end", text=f"{loc}    Grade {g}", open=True,
-                                     values=(f"Grade / เกรด: {g}" + (f"  (ถ้าใบรับรองน่าเชื่อถือ = {t['grade']['grade_ignoring_trust']})"
-                                                                    if g == "T" else ""), gs), tags=(gs, "sec"))
-                secs = {}
-                for sec, chk, result, st in t["rows"]:
-                    if sec not in secs:
-                        secs[sec] = self.tlsv.insert(h, "end", text=sec, open=True, tags=("sec",))
-                    self.tlsv.insert(secs[sec], "end", text=chk, values=(result, st), tags=(st,))
                 for c in t["ciphers"]:
                     self.ciph.insert("", "end", tags=(c["status"],), values=(
                         loc, c["protocol"], c["name"], c["openssl"], c["kx"], c["bits"], c["strength"]))
@@ -896,6 +1211,30 @@ class App(tk.Tk):
         for h, rs in group(self.rows, lambda r: r.get("host", "")):
             hc = counts(rs)
             self.hosts.insert("", "end", iid=h or "-", values=(h, *[hc[s] or "" for s in reversed(SEVS)]))
+
+    def check_tree(self, title):
+        """testssl-style tree: endpoint -> section -> (check, result, status). Used by SSL/TLS and HTTP Headers."""
+        tv = ttk.Treeview(self.sub, columns=("result", "status"), show="tree headings")
+        tv.heading("#0", text="Check / รายการตรวจ"); tv.column("#0", width=330)
+        tv.heading("result", text="Result / ผล"); tv.column("result", width=660)
+        tv.heading("status", text="Status"); tv.column("status", width=90, anchor="center")
+        for st, c in STATUS_COLOR.items():
+            tv.tag_configure(st, foreground=c)
+        tv.tag_configure("sec", background="#e3e8ec", font=("Segoe UI", 9, "bold"))
+        self.sub.add(tv, text=title)
+        return tv
+
+    @staticmethod
+    def fill_check_tree(tv, tables):
+        """tables: {key: (label, result, status, rows)}"""
+        tv.delete(*tv.get_children())
+        for label, result, status, rows in tables.values():
+            h = tv.insert("", "end", text=label, open=True, values=(result, status), tags=(status, "sec"))
+            secs = {}
+            for sec, chk, res, st in rows:
+                if sec not in secs:
+                    secs[sec] = tv.insert(h, "end", text=sec, open=True, tags=("sec",))
+                tv.insert(secs[sec], "end", text=chk, values=(res, st), tags=(st,))
 
     def sort_ciphers(self, col):
         rows = [(self.ciph.set(i, col), i) for i in self.ciph.get_children()]
@@ -943,37 +1282,46 @@ class App(tk.Tk):
         self.start([NUCLEI, "-nc", "-ut", "-ud", TPL], None)
 
     def start(self, cmd, outdir):
-        self.log.insert("end", " ".join(cmd) + "\n\n")
+        self.log.insert("end", " ".join(cmd) + "\n\n" if cmd else "[nuclei] skipped (no templates selected)\n")
         self.run_btn.state(["disabled"])
         threading.Thread(target=self._worker, args=(cmd, outdir), daemon=True).start()
 
     def _worker(self, cmd, outdir):
         logf = open(os.path.join(outdir, "scan.log"), "w", encoding="utf-8") if outdir else None
-        self.stopped = False
-        self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                                     encoding="utf-8", errors="replace", creationflags=subprocess.CREATE_NO_WINDOW)
+        self.stopped, self.proc, code = False, None, 0
         def log(line):
             if logf:
                 logf.write(line); logf.flush()
             self.after(0, self.log_line, line, outdir)
-        for line in self.proc.stdout:
-            log(line)
-        self.proc.wait()
+        if cmd:
+            self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                                         encoding="utf-8", errors="replace", creationflags=subprocess.CREATE_NO_WINDOW)
+            for line in self.proc.stdout:
+                log(line)
+            code = self.proc.wait()
         m = read_meta(outdir) if outdir else {}
-        if m.get("tls") and not self.stopped:
-            log("\n[tls] SSL/TLS deep check (testssl-style) ...\n")
+        t = m.get("targets", [])
+        modules = (("ports", "ports.json", lambda: port_scan(t, m["ports"], log, lambda: self.stopped)),
+                   ("tls", "tls.json", lambda: tls_scan(t, log)),
+                   ("headers", "headers.json", lambda: header_scan(t, log)))
+        for key, fname, fn in modules:
+            if not m.get(key) or self.stopped:
+                continue
+            log(f"\n[{key}] {MODULES[key]} ...\n")
             try:
-                found, tables = tls_scan(m.get("targets", []), log)
+                found, tables = fn()
+                if key == "tls" and m.get("headers"):  # the headers module reports HSTS itself
+                    found = [f for f in found if f["template-id"] != "tls-no-hsts"]
                 found = [f for f in found if sev_of(f) in m.get("sevs", SEVS)]
-                with open(os.path.join(outdir, "tls.json"), "w", encoding="utf-8") as fh:
+                with open(os.path.join(outdir, fname), "w", encoding="utf-8") as fh:
                     json.dump(tables, fh, ensure_ascii=False, indent=1)
                 with open(os.path.join(outdir, "findings.jsonl"), "a", encoding="utf-8") as fh:
                     fh.writelines(json.dumps(f, ensure_ascii=False) + "\n" for f in found)
-            except Exception as ex:  # TLS check must never lose the nuclei results already on disk
-                log(f"[tls] error: {ex!r}\n")
+            except Exception as ex:  # one module failing must never lose the results already on disk
+                log(f"[{key}] error: {ex!r}\n")
         if logf:
             logf.close()
-        self.after(0, self.finished, outdir, self.proc.returncode)
+        self.after(0, self.finished, outdir, code)
 
     def log_line(self, line, outdir):
         if outdir == self.shown_dir:
@@ -1006,8 +1354,9 @@ class App(tk.Tk):
         self.after(3000, self.tick)
 
     def stop(self):
+        if self.running_dir or (self.proc and self.proc.poll() is None):
+            self.stopped = True  # skips the remaining modules; the port scan checks it per probe
         if self.proc and self.proc.poll() is None:
-            self.stopped = True
             self.proc.terminate()
 
     def first_run(self):
@@ -1033,7 +1382,28 @@ if __name__ == "__main__":
         c = build_cmd("t.txt", ["ssl"], ["high"], "arcgis", 10, "")
         assert c[:3] == [NUCLEI, "-l", "t.txt"], c
         assert c[-6:] == ["-t", rf"{TPL}\ssl", "-severity", "high", "-tags", "arcgis"], c
-        assert all(set(p[0]) <= set(CATS) for p in PRESETS.values()) and DEFAULT_PRESET in PRESETS
+        assert all(set(p[0]) <= set(CATS) and p[4] <= set(MODULES) and (p[0] or p[4]) for p in PRESETS.values())
+        assert DEFAULT_PRESET in PRESETS
+        assert parse_ports("22,8000-8002") == [22, 8000, 8001, 8002] and 3389 in parse_ports("top")
+        assert len(parse_ports("all")) == 65535 and 8081 in parse_ports("top,8081")
+        for bad in ("0", "70000", "9-3", "abc"):
+            try:
+                parse_ports(bad); raise AssertionError(bad)
+            except ValueError:
+                pass
+        assert target_host("https://a.com:8443/x") == "a.com" and target_host("1.2.3.4") == "1.2.3.4"
+        hf, hr = header_findings("https://a", 200, {"server": "Microsoft-IIS/8.5", "x-powered-by": "ASP.NET",
+                                                    "x-forwarded-for": "10.0.0.5", "content-encoding": "gzip",
+                                                    "x-content-type-options": "nosniff", "x-frame-options": "DENY"},
+                                 ["sid=1; path=/", "ok=1; Secure; HttpOnly; SameSite=Lax"], "headers", "gzip")
+        ids = {f["template-id"] for f in hf}
+        assert {"hdr-hsts", "hdr-csp", "hdr-server-version", "hdr-tech-banner", "hdr-proxy-banner", "hdr-internal-ip",
+                "hdr-xfh-reflect", "hdr-cookie-flags", "hdr-breach"} <= ids, ids
+        assert not ids & {"hdr-xfo", "hdr-xcto", "hdr-cors"}, ids
+        assert ("Cookies", "ok", "Secure; HttpOnly; SameSite (OK)", "OK") in hr
+        hf, _ = header_findings("https://a", 200, {"server": "", "x-powered-by": "", "strict-transport-security": "max-age=1",
+                                                   "x-forwarded-for": "", "x-aspnet-version": ""}, [], "", "")
+        assert not {f["template-id"] for f in hf} & {"hdr-hsts", "hdr-server-version", "hdr-tech-banner", "hdr-proxy-banner"}
         rows = [{"template-id": "x", "host": "https://a", "matched-at": "https://a/1", "info": {"name": "<b>XSS</b>", "severity": "high"}},
                 {"template-id": "x", "host": "https://b", "info": {"name": "<b>XSS</b>", "severity": "high"}},
                 {"template-id": "y", "host": "https://a", "info": {"name": "Tech", "severity": "info", "reference": "https://r"}},
@@ -1054,6 +1424,12 @@ if __name__ == "__main__":
                                               "bits": 128, "strength": "strong", "status": "OK"}]}}, fh)
         out = open(make_html(d, ["https://a"]), encoding="utf-8").read()
         assert "SSL/TLS (testssl-style)" in out and "offered &lt;x&gt;" in out and out.count('class="sec"') == 2 and "TLS_X&lt;" in out             and ">B</span>" in out, "tls table"
+        with open(os.path.join(d, "ports.json"), "w") as fh:
+            json.dump({"a": [{"port": 3389, "service": "RDP", "banner": "<x>", "severity": "high", "note": "n"}]}, fh)
+        with open(os.path.join(d, "headers.json"), "w") as fh:
+            json.dump({"https://a": {"rows": [["Banners", "Server", "IIS/8.5", "LOW"]]}}, fh)
+        out = open(make_html(d, ["https://a"]), encoding="utf-8").read()
+        assert "<td>3389</td>" in out and "&lt;x&gt;" in out and "HTTP headers (testssl-style)" in out and "IIS/8.5" in out
         assert "&lt;b&gt;XSS" in out and "<b>XSS" not in out and out.index("Crit") < out.index("XSS") < out.index("Tech")
         assert "No findings" in open(make_html(tempfile.mkdtemp(), []), encoding="utf-8").read()
         shutil.rmtree(d)
