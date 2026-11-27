@@ -861,91 +861,231 @@ def write_meta(outdir, **kw):
         json.dump(m, fh, ensure_ascii=False, indent=1)
 
 
+# Risk rating definitions printed in the report. Fix windows follow common VA practice; adjust to the contract.
+SEV_DEF = {
+    "critical": ("ถูกโจมตีได้ทันทีจากภายนอกและกระทบร้ายแรง เช่น เข้าควบคุมระบบได้ หรือข้อมูลรั่วไหลทั้งหมด", "ทันที / ภายใน 7 วัน"),
+    "high": ("โจมตีได้ไม่ยาก และกระทบความลับ ความถูกต้อง หรือความพร้อมใช้งานของระบบอย่างมีนัยสำคัญ", "ภายใน 30 วัน"),
+    "medium": ("ต้องมีเงื่อนไขบางอย่างจึงจะโจมตีได้ หรือผลกระทบจำกัด", "ภายใน 90 วัน"),
+    "low": ("ความเสี่ยงต่ำ ส่วนใหญ่เป็นการตั้งค่าที่ควรปรับปรุงตามแนวปฏิบัติที่ดี", "รอบบำรุงรักษาถัดไป"),
+    "info": ("ข้อมูลประกอบการประเมิน ไม่ใช่ช่องโหว่โดยตรง เช่น เทคโนโลยีหรือเวอร์ชันที่ใช้", "ไม่ต้องดำเนินการ"),
+}
+
+
+def as_list(v):
+    return [] if not v else [v] if isinstance(v, (str, int, float)) else [x for x in v if x]
+
+
 def make_html(outdir, targets, name="VA Scan"):
+    """Formal VA report: cover, executive summary, scope, findings summary, detailed findings, appendices."""
     e = html.escape
-    tri = load_triage(outdir)
-    every = load_findings(outdir)
+    tri, every = load_triage(outdir), load_findings(outdir)
     rows = active(every, tri)  # false positives never reach the client report
-    cards = "".join(f'<div class="card" style="border-color:{SEV_COLOR[s]}"><b>{n}</b>{s}</div>'
-                    for s, n in counts(rows).items())
+    m = read_meta(outdir)
+    c = counts(rows)
+    groups = group(rows, lambda r: r.get("template-id", ""))
+    fid = {tid: f"VA-{n:03d}" for n, (tid, _) in enumerate(groups, 1)}
+    worst = next((s for s in reversed(SEVS) if c[s] and s != "info"), None)
+    stamp = os.path.basename(outdir)
+    try:
+        started = time.strftime("%Y-%m-%d %H:%M", time.strptime(stamp[:15], "%Y%m%d-%H%M%S"))
+    except ValueError:
+        started = stamp
+    finished = (m.get("finished") or "")[:16]
+    nhosts = len({r.get("host", "") for r in rows})
+    sev = lambda s: f'<span class="sev" style="background:{SEV_COLOR[s]}">{s.upper()}</span>'
+    badge = lambda st, txt: f'<span class="st" style="background:{STATUS_COLOR.get(st, "#999")}">{e(txt)}</span>'
+    risk = (f'<span class="risk" style="background:{SEV_COLOR[worst]}">{worst.upper()}</span>' if worst
+            else '<span class="risk" style="background:#2e7d32">LOW / NONE</span>')
+
+    def status(rs):
+        sts = {tri.get(fkey(x), {}).get("status") for x in rs}
+        return short(next(iter(sts))) if len(sts) == 1 and None not in sts else "Partially marked" if sts - {None} else "Open"
+
+    def cls(r):  # CVSS / CVE / CWE from the nuclei template, when it has them
+        k = r.get("info", {}).get("classification") or {}
+        return k.get("cvss-score"), k.get("cvss-metrics"), as_list(k.get("cve-id")), as_list(k.get("cwe-id"))
+
+    # ---- executive summary ----
+    top = [(tid, rs) for tid, rs in groups if sev_of(rs[0]) in ("critical", "high", "medium")][:10]
+    peak = max(c.values()) or 1
+    bars = "".join(f'<tr><td class="lbl">{s.title()}<br><small>{SEV_TH[s]}</small></td><td class="bar"><div style="width:'
+                   f'{c[s] * 100 // peak}%;background:{SEV_COLOR[s]}"></div></td><td class="n">{c[s]}</td></tr>'
+                   for s in reversed(SEVS))
+    summary = (f"การประเมินช่องโหว่ด้วยเครื่องมืออัตโนมัติพบช่องโหว่และข้อสังเกตทั้งหมด <b>{len(rows)}</b> รายการ "
+               f"(<b>{len(groups)}</b> ประเภท) บน <b>{nhosts}</b> เป้าหมาย แบ่งเป็น "
+               + ", ".join(f"{s.title()} {c[s]}" for s in reversed(SEVS)) +
+               f" ระดับความเสี่ยงโดยรวมของระบบคือ {risk}" if rows else
+               "การประเมินไม่พบช่องโหว่ในระดับความรุนแรงที่เลือกตรวจ / No findings for the selected severities.")
+    keyf = ("<h3>Key findings / ช่องโหว่ที่ควรแก้ไขก่อน</h3><table class=\"grid\"><tr><th>ID</th><th>Finding</th>"
+            "<th>Severity</th><th>Affected</th></tr>" + "".join(
+                f'<tr><td><a href="#{fid[t]}">{fid[t]}</a></td><td>{e(rs[0].get("info", {}).get("name", t))}</td>'
+                f'<td>{sev(sev_of(rs[0]))}</td><td>{len(rs)}</td></tr>' for t, rs in top) + "</table>") if top else ""
     host_rows = "".join(f"<tr><td>{e(h)}</td>" + "".join(f"<td>{n or ''}</td>" for n in counts(rs).values()) + "</tr>"
                         for h, rs in group(rows, lambda r: r.get("host", "")))
-    items = []
-    for tid, rs in group(rows, lambda r: r.get("template-id", "")):
-        r = rs[0]
-        i = r.get("info", {})
-        sev = sev_of(r)
-        refs = i.get("reference") or []
-        refs = [refs] if isinstance(refs, str) else refs
+    hosts = ("<h3>Findings by host / ผลรายเป้าหมาย</h3><table class=\"grid\"><tr><th>Host</th>" +
+             "".join(f"<th>{s.title()}</th>" for s in reversed(SEVS)) + f"</tr>{host_rows}</table>") if host_rows else ""
+
+    # ---- scope & methodology ----
+    mods = []
+    if m.get("cats") or m.get("nuclei"):
+        mods.append(("nuclei templates (ProjectDiscovery)", ", ".join(TH.get(x, x) for x in m.get("cats", []))
+                     + (f" · tags: {m['tags']}" if m.get("tags") else "")))
+    if m.get("ports"):
+        mods.append(("TCP port scan + banner", f"พอร์ต / ports: {m['ports']}"))
+    if m.get("tls"):
+        mods.append(("SSL/TLS (testssl.sh-style, sslyze)", "โปรโตคอล, cipher, ใบรับรอง, ช่องโหว่ TLS, เกรด"))
+    if m.get("headers"):
+        mods.append(("HTTP security headers", "security headers, banners, cookies, CORS, BREACH"))
+    excluded = len(every) - len(rows)
+    scope = (
+        '<table class="grid"><tr><th>#</th><th>Target / เป้าหมาย</th></tr>' +
+        "".join(f"<tr><td>{n}</td><td>{e(t)}</td></tr>" for n, t in enumerate(targets, 1)) + "</table>"
+        "<h3>Tests performed / รายการที่ทดสอบ</h3><table class=\"grid\"><tr><th>Test</th><th>Coverage</th></tr>" +
+        "".join(f"<tr><td>{e(a)}</td><td>{e(b)}</td></tr>" for a, b in mods) + "</table>"
+        "<h3>Risk rating / เกณฑ์ระดับความเสี่ยง</h3><table class=\"grid\"><tr><th>Severity</th><th>Definition / ความหมาย</th>"
+        "<th>Recommended fix time / ระยะเวลาแก้ไขที่แนะนำ</th></tr>" +
+        "".join(f"<tr><td>{sev(s)}</td><td>{SEV_DEF[s][0]}</td><td>{SEV_DEF[s][1]}</td></tr>" for s in reversed(SEVS)) +
+        "</table><h3>Limitations / ข้อจำกัด</h3><ul>"
+        "<li>ผลการประเมินสะท้อนสถานะของระบบ ณ ช่วงเวลาที่ทดสอบเท่านั้น (point-in-time)</li>"
+        "<li>เป็นการทดสอบด้วยเครื่องมืออัตโนมัติ อาจมีช่องโหว่ที่ตรวจไม่พบ (false negative) "
+        "ควรประเมินร่วมกับการทดสอบเจาะระบบ (penetration test) ตามความเหมาะสม</li>" +
+        (f"<li>รายการที่ผู้ประเมินตรวจสอบแล้วว่าไม่ใช่ช่องโหว่ (false positive) {excluded} รายการ ไม่ถูกรวมในรายงานนี้ "
+         f"/ {excluded} false positive(s) excluded</li>" if excluded else "") + "</ul>")
+
+    # ---- findings ----
+    overview = ('<table class="grid"><tr><th>ID</th><th>Finding / ช่องโหว่</th><th>Severity</th><th>CVSS</th>'
+                '<th>Affected</th><th>Status</th></tr>' + "".join(
+                    f'<tr><td><a href="#{fid[t]}">{fid[t]}</a></td><td class="l">{e(rs[0].get("info", {}).get("name", t))}</td>'
+                    f'<td>{sev(sev_of(rs[0]))}</td><td>{e(str(cls(rs[0])[0] or "-"))}</td><td>{len(rs)}</td>'
+                    f'<td>{e(status(rs))}</td></tr>' for t, rs in groups) + "</table>") if groups else \
+        "<p>No findings for the selected severities.</p>"
+    details = []
+    for tid, rs in groups:
+        r, i = rs[0], rs[0].get("info", {})
+        score, vector, cves, cwes = cls(r)
+        refs = [u for u in as_list(i.get("reference")) if str(u).startswith("http")]
         extra = sorted({str(x) for x in rs for x in (x.get("extracted-results") or [])})
-        detail = "".join(f"<dt>{k}</dt><dd>{v}</dd>" for k, v in [
-            ("Template", e(tid)),
-            ("Status", "<br>".join(sorted({e(f'{x.get("matched-at", x.get("host", ""))}: {TRIAGE[t["status"]]}'
-                                             + (f' ({t["note"]})' if t.get("note") else ""))
-                                           for x in rs for t in [tri.get(fkey(x), {})] if t.get("status")}))),
-            ("Affected", "<br>".join(sorted({e(x.get("matched-at", x.get("host", ""))) for x in rs}))),
-            ("Description", e(i.get("description", "")).replace("\n", "<br>")),
-            ("Remediation", e(i.get("remediation", "")).replace("\n", "<br>")),
-            ("Extracted", "<br>".join(e(x) for x in extra)),
-            ("References", "<br>".join(f'<a href="{e(u)}">{e(u)}</a>' for u in refs if str(u).startswith("http"))),
-            ("Reproduce", f"<pre>{e(r.get('curl-command', ''))}</pre>" if r.get("curl-command") else ""),
-        ] if v)
-        items.append(f'<details><summary><span class="sev" style="background:{SEV_COLOR[sev]}">{e(sev)}</span>'
-                     f'{e(i.get("name", tid))} <small>{len(rs)} instance(s)</small></summary><dl>{detail}</dl></details>')
-    body = "".join(items) or "<p>No findings for the selected severities.</p>"
-    hosts = (f"<h2>Hosts</h2><table><tr><th>Host</th>" + "".join(f"<th>{s}</th>" for s in reversed(SEVS)) +
-             f"</tr>{host_rows}</table>") if host_rows else ""
-    tls = ""
-    badge = lambda st, txt: f'<span class="st" style="background:{STATUS_COLOR.get(st, "#999")}">{e(txt)}</span>'
+        marks = sorted({e(f'{x.get("matched-at", x.get("host", ""))}: {TRIAGE[t["status"]]}' + (f' ({t["note"]})' if t.get("note") else ""))
+                        for x in rs for t in [tri.get(fkey(x), {})] if t.get("status")})
+        para = lambda s: e(str(s)).strip().replace("\n", "<br>")
+        kv = [("Severity / ความรุนแรง", f'{sev(sev_of(r))} {SEV_TH[sev_of(r)]}'
+               + (f' &nbsp; CVSS <b>{e(str(score))}</b>' if score else "") + (f' <small>{e(vector)}</small>' if vector else "")),
+              ("CVE", ", ".join(f'<a href="https://nvd.nist.gov/vuln/detail/{e(str(x).upper())}">{e(str(x).upper())}</a>' for x in cves)),
+              ("CWE", ", ".join(e(str(x).upper()) for x in cwes)),
+              ("Status / สถานะ", "<br>".join(marks) or "Open"),
+              ("Affected / จุดที่พบ", "<br>".join(sorted({e(x.get("matched-at", x.get("host", ""))) for x in rs}))),
+              ("Description / รายละเอียด", para(i.get("description", ""))),
+              ("Impact / ผลกระทบ", para(i.get("impact", ""))),
+              ("Recommendation / วิธีแก้ไข", para(i.get("remediation", "")) or "ดูเอกสารอ้างอิง / See references"),
+              ("Evidence / หลักฐาน", "<br>".join(e(x) for x in extra)),
+              ("Reproduce / ทดสอบซ้ำ", f"<pre>{e(r.get('curl-command', ''))}</pre>" if r.get("curl-command") else ""),
+              ("References / อ้างอิง", "<br>".join(f'<a href="{e(u)}">{e(u)}</a>' for u in refs)),
+              ("Check ID", f"<small>{e(tid)}</small>")]
+        details.append(f'<section class="finding" id="{fid[tid]}"><h3 style="border-color:{SEV_COLOR[sev_of(r)]}">'
+                       f'<span class="fid">{fid[tid]}</span>{e(i.get("name", tid))}</h3><table class="kv">' +
+                       "".join(f"<tr><th>{k}</th><td>{v}</td></tr>" for k, v in kv if v) + "</table></section>")
+
+    # ---- appendices: module tables ----
     def check_table(rows):  # testssl-style table: section bars + check / result / status
         body_rows, last = [], None
-        for sec, chk, result, st in rows:
-            if sec != last:
-                body_rows.append(f'<tr class="sec"><td colspan="3">{e(sec)}</td></tr>')
-                last = sec
+        for sec_, chk, result, st in rows:
+            if sec_ != last:
+                body_rows.append(f'<tr class="sec"><td colspan="3">{e(sec_)}</td></tr>')
+                last = sec_
             body_rows.append(f'<tr><td>{e(str(chk))}</td><td style="color:{STATUS_COLOR.get(st, "#222")}">{e(str(result))}</td>'
                              f'<td>{badge(st, st)}</td></tr>')
         return f'<table class="tls"><tr><th>Check</th><th>Result</th><th>Status</th></tr>{"".join(body_rows)}</table>'
 
+    apx = []
     ports = "".join(f'<tr><td>{e(h)}</td><td>{p["port"]}</td><td>{e(p["service"])}</td><td>{badge(p["severity"].upper(), p["severity"])}'
                     f'</td><td>{e(p["banner"])}</td><td>{e(p["note"])}</td></tr>'
                     for h, ps in load_json(outdir, "ports.json").items()
                     for p in sorted(ps, key=lambda p: (rank(p["severity"]), p["port"])))
     if ports:
-        ports = (f'<h2>Open ports / พอร์ตที่เปิด</h2><table class="tls ciphers"><tr><th>Host</th><th>Port</th><th>Service</th>'
-                 f'<th>Risk</th><th>Banner</th><th>Note</th></tr>{ports}</table>')
-    hdrs = "".join(f"<h3>{e(u)}</h3>{check_table(t['rows'])}" for u, t in load_json(outdir, "headers.json").items())
-    if hdrs:
-        hdrs = f"<h2>HTTP headers (testssl-style)</h2>{hdrs}"
-    for loc, t in load_tls(outdir).items():  # testssl-style table per endpoint
+        apx.append(("Open ports / พอร์ตที่เปิด", '<table class="tls ciphers"><tr><th>Host</th><th>Port</th><th>Service</th>'
+                    f'<th>Risk</th><th>Banner</th><th>Note</th></tr>{ports}</table>'))
+    tls = ""
+    for loc, t in load_tls(outdir).items():
         cl = t["ciphers"]
-        crows = "".join(f'<tr><td>{e(c["protocol"])}</td><td>{e(c["name"])}</td><td>{e(c["openssl"])}</td>'
-                        f'<td>{e(c["kx"])}</td><td>{c["bits"]}</td><td>{badge(c["status"], c["strength"])}</td></tr>' for c in cl)
+        crows = "".join(f'<tr><td>{e(c_["protocol"])}</td><td>{e(c_["name"])}</td><td>{e(c_["openssl"])}</td>'
+                        f'<td>{e(c_["kx"])}</td><td>{c_["bits"]}</td><td>{badge(c_["status"], c_["strength"])}</td></tr>' for c_ in cl)
         g = t["grade"].get("grade", "-")
         tls += (f'<h3><span class="grade" style="background:{GRADE_COLOR.get(g, "#757575")}">{e(g)}</span>{e(loc)}</h3>'
                 + check_table(t["rows"]) + (f'<h4>Accepted cipher suites / cipher ที่เซิร์ฟเวอร์ยอมรับ ({len(cl)})</h4><table class="tls ciphers">'
                    f'<tr><th>Protocol</th><th>IANA name</th><th>OpenSSL name</th><th>Key exchange</th><th>Bits</th>'
                    f'<th>Strength</th></tr>{crows}</table>' if cl else ""))
     if tls:
-        tls = f"<h2>SSL/TLS (testssl-style)</h2>{tls}"
-    page = f"""<!doctype html><html><head><meta charset="utf-8"><title>VA Scan Report</title><style>
-body{{font-family:Segoe UI,Tahoma,sans-serif;max-width:1100px;margin:24px auto;padding:0 16px;color:#222}}
-.cards{{display:flex;gap:10px;margin:16px 0}}.card{{border-left:6px solid;padding:8px 16px;background:#f5f5f5;min-width:90px}}
-.card b{{display:block;font-size:26px}}details{{border:1px solid #ddd;border-radius:6px;margin:6px 0;padding:8px 12px}}
-summary{{cursor:pointer;font-weight:600}}small{{color:#666;font-weight:400;margin-left:8px}}
-.sev{{color:#fff;border-radius:4px;padding:2px 8px;margin-right:8px;font-size:12px;text-transform:uppercase}}
-table{{border-collapse:collapse}}td,th{{border:1px solid #ddd;padding:4px 10px;text-align:center}}td:first-child{{text-align:left}}
-dt{{font-weight:600;margin-top:8px}}dd{{margin:2px 0 0 0;word-break:break-all}}pre{{white-space:pre-wrap;background:#f5f5f5;padding:8px}}
-table.tls{{width:100%;margin-bottom:16px}}table.tls td{{text-align:left;overflow-wrap:anywhere}}table.tls td:first-child{{width:230px;overflow-wrap:normal}}table.tls td:last-child{{width:90px;text-align:center}}
-tr.sec td{{background:#263238;color:#fff;font-weight:600}}.st{{color:#fff;border-radius:4px;padding:1px 8px;font-size:12px;white-space:nowrap}}
-table.ciphers td,table.ciphers td:first-child{{width:auto;white-space:nowrap;font-size:13px;overflow-wrap:normal}}.grade{{display:inline-block;color:#fff;font-size:30px;font-weight:700;min-width:60px;
-text-align:center;border-radius:8px;padding:4px 10px;margin-right:12px;vertical-align:middle}}
-@media print{{details{{break-inside:avoid}}tr{{break-inside:avoid}}}}</style></head><body>
-<h1>Vulnerability Assessment Report</h1>
-<p><b>{e(name)}</b> &middot; Scan time: {e(os.path.basename(outdir))} &middot; Findings: {len(rows)}{
-    f" &middot; {len(every) - len(rows)} false positive(s) excluded" if len(every) > len(rows) else ""}</p>
-<p>Targets: {"<br>".join(e(t) for t in targets)}</p>
-<div class="cards">{cards}</div>{hosts}<h2>Vulnerabilities</h2>{body}{ports}{tls}{hdrs}</body></html>"""
+        apx.append(("SSL/TLS (testssl-style)", tls))
+    hdrs = "".join(f"<h3>{e(u)}</h3>{check_table(t['rows'])}" for u, t in load_json(outdir, "headers.json").items())
+    if hdrs:
+        apx.append(("HTTP headers (testssl-style)", hdrs))
+    letters = "ABCDEFG"
+    toc = "".join(f'<li><a href="#s{n}">{t}</a></li>' for n, t in enumerate(
+        ("Executive Summary / บทสรุปผู้บริหาร", "Scope &amp; Methodology / ขอบเขตและวิธีการ",
+         "Findings Summary / สรุปรายการช่องโหว่", "Detailed Findings / รายละเอียดช่องโหว่"), 1)) + "".join(
+        f'<li class="apx"><a href="#a{n}">Appendix {letters[n]} – {t}</a></li>' for n, (t, _) in enumerate(apx))
+    meta_rows = [("Report date / วันที่ออกรายงาน", finished[:10] or time.strftime("%Y-%m-%d")),
+                 ("Assessment period / ช่วงเวลาทดสอบ", f"{started}" + (f" – {finished}" if finished else "")),
+                 ("Scan profile / รูปแบบการสแกน", e(m.get("preset", "") or "-")),
+                 ("Targets / จำนวนเป้าหมาย", str(len(targets))),
+                 ("Overall risk / ความเสี่ยงโดยรวม", risk)]
+    page = f"""<!doctype html><html lang="th"><head><meta charset="utf-8"><title>VA Report - {e(name)}</title><style>
+:root{{--ink:#1d2433;--navy:#1f3a5f;--line:#d5dbe3;--soft:#f3f5f8}}
+*{{box-sizing:border-box}}
+body{{font-family:"Segoe UI","Leelawadee UI",Tahoma,sans-serif;color:var(--ink);background:#e9ecf0;margin:0;font-size:14px;line-height:1.55}}
+.doc{{max-width:980px;margin:24px auto;background:#fff;box-shadow:0 2px 12px rgba(0,0,0,.12);padding:56px 64px}}
+a{{color:#1565c0;text-decoration:none}}
+.cover{{min-height:1150px;display:flex;flex-direction:column;border-left:10px solid var(--navy);padding:40px 0 0 40px;margin:-56px -64px 0;padding-right:64px}}
+.classif{{align-self:flex-end;border:2px solid #b71c1c;color:#b71c1c;font-weight:700;padding:4px 14px;letter-spacing:1px}}
+.brand{{color:var(--navy);font-weight:700;letter-spacing:3px;margin-top:120px}}
+.cover h1{{font-size:38px;line-height:1.2;color:var(--navy);margin:10px 0 6px}}
+.cover h1 span{{display:block;font-size:22px;font-weight:400;color:#4a5568}}
+.proj{{font-size:22px;font-weight:600;margin:28px 0 36px;padding-bottom:16px;border-bottom:1px solid var(--line)}}
+table.meta td{{border:0;padding:6px 24px 6px 0;text-align:left}}table.meta td:first-child{{color:#5a6577;width:290px}}
+.note{{margin-top:auto;color:#5a6577;font-size:12px;border-top:1px solid var(--line);padding:14px 0 40px}}
+h2{{color:var(--navy);font-size:22px;border-bottom:3px solid var(--navy);padding-bottom:6px;margin:48px 0 16px}}
+h3{{color:var(--navy);font-size:16px;margin:24px 0 10px}}
+.toc li{{margin:6px 0;font-size:15px}}.toc li.apx{{list-style:none;margin-left:-18px}}
+table{{border-collapse:collapse;width:100%}}
+table.grid th,table.tls th{{background:var(--navy);color:#fff;font-weight:600;text-align:left}}
+table.grid td,table.grid th,table.tls td,table.tls th{{border:1px solid var(--line);padding:6px 10px;vertical-align:top}}
+table.grid tr:nth-child(even) td{{background:var(--soft)}}td.l{{text-align:left}}
+.sev,.st{{color:#fff;border-radius:3px;padding:1px 8px;font-size:11px;font-weight:700;letter-spacing:.5px;white-space:nowrap}}
+.risk{{color:#fff;font-weight:700;padding:3px 14px;border-radius:3px;letter-spacing:1px}}
+.chart td{{border:0;padding:4px 8px}}.chart .lbl{{width:110px;font-weight:600}}.chart .n{{width:50px;font-weight:700;text-align:right}}
+.chart .bar div{{height:20px;min-width:2px;border-radius:2px}}
+.exec{{display:grid;grid-template-columns:1fr 360px;gap:28px;align-items:start}}
+.finding{{border:1px solid var(--line);margin:18px 0;break-inside:avoid}}
+.finding h3{{margin:0;padding:10px 14px;background:var(--soft);border-left:6px solid;font-size:15px}}
+.fid{{color:#5a6577;font-weight:600;margin-right:10px}}
+table.kv th{{width:210px;text-align:left;background:#fafbfc;color:#4a5568;font-weight:600}}
+table.kv th,table.kv td{{border-top:1px solid var(--line);padding:7px 14px;vertical-align:top;overflow-wrap:anywhere}}
+pre{{white-space:pre-wrap;background:var(--soft);padding:8px;margin:0;font-size:12px}}small{{color:#5a6577}}
+table.tls{{margin-bottom:16px}}table.tls td{{overflow-wrap:anywhere}}table.tls td:first-child{{width:230px;overflow-wrap:normal}}
+table.tls td:last-child{{width:90px;text-align:center}}tr.sec td{{background:#e3e8ee;font-weight:700;color:var(--navy)}}
+table.ciphers td,table.ciphers td:first-child{{width:auto;white-space:nowrap;font-size:12px;overflow-wrap:normal}}
+.grade{{display:inline-block;color:#fff;font-size:26px;font-weight:700;min-width:56px;text-align:center;border-radius:6px;
+padding:2px 10px;margin-right:12px;vertical-align:middle}}
+.page{{break-before:page}}
+@page{{size:A4;margin:16mm 14mm 18mm;@bottom-left{{content:"CONFIDENTIAL · Vulnerability Assessment Report";font-size:9px;color:#777;font-family:"Segoe UI",Tahoma,sans-serif}}
+@bottom-right{{content:"Page " counter(page) " / " counter(pages);font-size:9px;color:#777;font-family:"Segoe UI",Tahoma,sans-serif}}}}
+@page:first{{@bottom-left{{content:none}}@bottom-right{{content:none}}}}
+@media print{{body{{background:#fff;font-size:12px}}.doc{{box-shadow:none;margin:0;padding:0;max-width:none}}
+.cover{{min-height:250mm;margin:0;padding:20mm 0 0 14mm}}h2{{margin-top:0}}tr{{break-inside:avoid}}a{{color:inherit}}}}
+</style></head><body><div class="doc">
+<section class="cover"><div class="classif">CONFIDENTIAL / เอกสารลับ</div><div class="brand">VA SCANNER</div>
+<h1>Vulnerability Assessment Report<span>รายงานผลการประเมินช่องโหว่ระบบสารสนเทศ</span></h1>
+<div class="proj">{e(name)}</div><table class="meta">{"".join(f"<tr><td>{k}</td><td>{v}</td></tr>" for k, v in meta_rows)}</table>
+<div class="note">เอกสารนี้มีข้อมูลช่องโหว่ของระบบสารสนเทศ ซึ่งเป็นข้อมูลที่มีความอ่อนไหว ให้เปิดเผยเฉพาะผู้ที่เกี่ยวข้องเท่านั้น<br>
+This document contains sensitive security information. Distribution is restricted to authorized personnel.</div></section>
+<section class="page"><h2>Contents / สารบัญ</h2><ol class="toc">{toc}</ol></section>
+<section class="page" id="s1"><h2>1. Executive Summary / บทสรุปผู้บริหาร</h2>
+<div class="exec"><div><p>{summary}</p></div><table class="chart">{bars}</table></div>{keyf}{hosts}</section>
+<section class="page" id="s2"><h2>2. Scope &amp; Methodology / ขอบเขตและวิธีการ</h2>{scope}</section>
+<section class="page" id="s3"><h2>3. Findings Summary / สรุปรายการช่องโหว่</h2>{overview}</section>
+<section class="page" id="s4"><h2>4. Detailed Findings / รายละเอียดช่องโหว่</h2>{"".join(details) or "<p>-</p>"}</section>
+{"".join(f'<section class="page" id="a{n}"><h2>Appendix {letters[n]} – {t}</h2>{body}</section>' for n, (t, body) in enumerate(apx))}
+</div></body></html>"""
     path = os.path.join(outdir, "report.html")
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(page)
