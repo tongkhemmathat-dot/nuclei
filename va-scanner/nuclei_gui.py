@@ -951,7 +951,7 @@ class App(tk.Tk):
         ttk.Button(bar, text="Re-run / สแกนซ้ำ", command=self.rerun).pack(side="left", padx=4)
         ttk.Button(bar, text="Open folder / เปิดโฟลเดอร์", command=lambda: (os.makedirs(REPORTS, exist_ok=True),
                                                                           os.startfile(REPORTS))).pack(side="left", padx=4)
-        ttk.Button(bar, text="Update templates / อัปเดตเทมเพลต", command=self.update_templates).pack(side="right")
+        ttk.Button(bar, text="Update nuclei + templates / อัปเดต", command=self.update_templates).pack(side="right")
         cols = ("name", "template", "targets", "date", "status") + tuple(reversed(SEVS))
         self.scans = ttk.Treeview(ttk.Frame(t), columns=cols, show="headings", selectmode="browse")
         heads = {"name": "Name / ชื่อ", "template": "Template / รูปแบบ", "targets": "Targets / เป้าหมาย",
@@ -1154,7 +1154,7 @@ class App(tk.Tk):
         self.running_dir = outdir
         self.refresh_scans()
         self.show_results(outdir); self.tabs.select(2)
-        self.start(cmd, outdir)
+        self.start([cmd] if cmd else [], outdir)
 
     # ---------- Results ----------
     def build_results_tab(self):
@@ -1365,30 +1365,35 @@ class App(tk.Tk):
         if self.busy():
             return
         self.shown_dir = None
-        self.res_title.config(text="Updating templates / กำลังอัปเดตเทมเพลต")
+        self.res_title.config(text="Updating nuclei + templates / กำลังอัปเดต nuclei และเทมเพลต")
         self.log.delete("1.0", "end"); self.tabs.select(2); self.sub.select(self.log)
-        self.start([NUCLEI, "-nc", "-ut", "-ud", TPL], None)
+        # engine first (-up replaces nuclei.exe in place), then templates; -up and -ut are separate runs
+        self.start([[NUCLEI, "-nc", "-up"], [NUCLEI, "-nc", "-ut", "-ud", TPL]], None)
 
-    def start(self, cmd, outdir):
-        self.log.insert("end", " ".join(cmd) + "\n\n" if cmd else "[nuclei] skipped (no templates selected)\n")
+    def start(self, cmds, outdir):
+        """cmds: commands run one after another before the modules; [] skips nuclei."""
+        self.log.insert("end", "".join(" ".join(c) + "\n" for c in cmds) + "\n" if cmds
+                        else "[nuclei] skipped (no templates selected)\n")
         self.run_btn.state(["disabled"])
         self.started = time.time()
         self.prog.pack(side="left", padx=10); self.prog.start(12)
-        threading.Thread(target=self._worker, args=(cmd, outdir), daemon=True).start()
+        threading.Thread(target=self._worker, args=(cmds, outdir), daemon=True).start()
 
-    def _worker(self, cmd, outdir):
+    def _worker(self, cmds, outdir):
         logf = open(os.path.join(outdir, "scan.log"), "w", encoding="utf-8") if outdir else None
         self.stopped, self.proc, code = False, None, 0
         def log(line):
             if logf:
                 logf.write(line); logf.flush()
             self.after(0, self.log_line, line, outdir)
-        if cmd:
+        for cmd in cmds:
+            if self.stopped:
+                break
             self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                                          encoding="utf-8", errors="replace", creationflags=subprocess.CREATE_NO_WINDOW)
             for line in self.proc.stdout:
                 log(line)
-            code = self.proc.wait()
+            code = self.proc.wait() or code
         m = read_meta(outdir) if outdir else {}
         t = m.get("targets", [])
         modules = (("ports", "ports.json", lambda: port_scan(t, m["ports"], log, lambda: self.stopped)),

@@ -212,7 +212,7 @@
 1. **ห้ามสแกนเป้าหมายที่ไม่มีหนังสืออนุญาต** และต้องตรวจขอบเขต (scope) ให้ตรงกับหนังสือ
 2. การ์ด **INTRUSIVE** ต้องให้หัวหน้าอนุมัติก่อนทุกครั้ง
 3. ความเร็วไม่ควรเกิน **20 ครั้ง/วินาที** กับระบบ production ของลูกค้า (ค่าเริ่มต้นตั้งไว้ 20)
-4. กด **อัปเดตเทมเพลต** สัปดาห์ละครั้ง (ต้องใช้อินเทอร์เน็ต)
+4. กด **Update nuclei + templates / อัปเดต** ในหน้า My Scans สัปดาห์ละครั้ง (ต้องใช้อินเทอร์เน็ต) ปุ่มนี้อัปเดตทั้งตัว nuclei และชุดการตรวจให้เป็นเวอร์ชันล่าสุด ไม่ต้องรอโปรแกรมเวอร์ชันใหม่
 5. โฟลเดอร์ `reports\` เป็นข้อมูลลูกค้า **ห้ามอัปโหลดขึ้น GitHub หรือแชร์ภายนอก**
 
 ## ปัญหาที่พบบ่อย
@@ -222,6 +222,7 @@
 | Windows ขึ้น "Windows protected your PC" | กด **More info** แล้วกด **Run anyway** (โปรแกรมยังไม่ได้ sign) |
 | Windows Defender ลบ `VA-Scanner.exe` โดยแจ้ง `Trojan:Win32/Bearfoos.A!ml` | เป็นการแจ้งเตือนผิด (false positive) จาก machine learning ของ Defender ซึ่งเจอบ่อยกับโปรแกรม Python ที่แพ็กเป็น exe ตั้งแต่ v1.2.0 build แบบ onedir ซึ่งโดนน้อยกว่ามาก ถ้ายังโดน ให้ Restore ใน Windows Security → Protection history หรือส่งไฟล์ให้ Microsoft ตรวจที่ [WDSI](https://www.microsoft.com/wdsi/filesubmission) |
 | แอนตี้ไวรัสลบหรือบล็อก `nuclei.exe` | เป็นเครื่องมือสแกนช่องโหว่ จึงถูกตรวจจับบ่อย ขอฝ่าย IT ให้ whitelist โฟลเดอร์ VA-Scanner |
+| กดอัปเดตแล้วขึ้น "No new updates" แต่ชุดการตรวจยังเก่า | nuclei จำเวอร์ชันไว้ที่ `%APPDATA%\nuclei\.templates-config.json` ไม่ได้ดูจากโฟลเดอร์ (มักเกิดหลังแตก zip ทับ) ให้ลบโฟลเดอร์ `nuclei-templates\` แล้วเปิดโปรแกรมใหม่ โปรแกรมจะดาวน์โหลดให้ใหม่ |
 | ขึ้น "ไม่พบ nuclei.exe" | ต้องวาง `nuclei.exe` ไว้โฟลเดอร์เดียวกับ `VA-Scanner.exe` |
 | เปิด `VA-Scanner.exe` ไม่ขึ้น | โฟลเดอร์ `_internal\` ต้องอยู่คู่กับ exe ห้ามย้าย exe ออกมาเดี่ยวๆ |
 | แท็บ Ports บอก "ไม่ได้เลือกโมดูลสแกนพอร์ต" | ใช้การ์ด Port Scan / Network หรือติ๊ก Port scan ในหน้าต่าง Customize |
