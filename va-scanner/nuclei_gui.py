@@ -1,5 +1,5 @@
 """VA Scanner: a scan-manager GUI around nuclei. Run: python nuclei_gui.py  (self-check: --test)"""
-import html, json, os, shutil, subprocess, sys, threading, time, tkinter as tk
+import html, json, os, shutil, subprocess, sys, textwrap, threading, time, tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
 
 # Portable: everything lives next to the app (VA-Scanner.exe or this .py), so the folder can be copied anywhere.
@@ -61,6 +61,44 @@ PRESETS = {
                              set(MODULES)),
 }
 DEFAULT_PRESET = "Standard VA / ตรวจมาตรฐาน"
+# preset -> (when to use, rough duration per target). The checks/modules list is generated from PRESETS.
+PRESET_HELP = {
+    "Quick Scan / ตรวจเร็ว": ("ตรวจคร่าวๆ ก่อนเริ่มงานจริง หรือเช็คเว็บหลังแก้ไขค่าเสร็จ อยากรู้ผลเร็ว", "~5 นาที"),
+    "Standard VA / ตรวจมาตรฐาน": ("งาน VA เว็บไซต์ทั่วไป ครอบคลุมการตั้งค่าผิด ข้อมูลรั่ว หน้าแอดมินที่เปิดเผย "
+                                  "และ SSL โดยไม่ยิงช่องโหว่จริง เหมาะเป็นค่าเริ่มต้น", "10-30 นาที"),
+    "Network / ตรวจเครือข่าย": ("ตรวจเซิร์ฟเวอร์หรือ IP (ไม่ใช่เว็บ) ดูพอร์ตที่เปิด บริการที่รัน DNS และ SSL", "10-30 นาที"),
+    "Asset Discovery / สำรวจระบบ": ("ทำบัญชีทรัพย์สิน: เป้าหมายใช้ซอฟต์แวร์/เวอร์ชันอะไร เปิดพอร์ตอะไร "
+                                    "ผลส่วนใหญ่เป็นระดับ info ไม่ใช่ช่องโหว่", "5-20 นาที"),
+    "Port Scan / สแกนพอร์ต": ("อยากรู้แค่ว่าเปิดพอร์ตอะไรบ้าง และมีบริการเสี่ยงเช่น RDP SMB ฐานข้อมูล เปิดออกเน็ตหรือไม่",
+                              "1-5 นาที (top) · นานขึ้นมากถ้าเลือก all"),
+    "testssl.sh only / เฉพาะ testssl": ("ตรวจ SSL/TLS และ HTTP header แบบละเอียดอย่างเดียว ไม่ใช้ nuclei "
+                                        "เหมาะกับการยืนยันผลหลังแก้ config เว็บเซิร์ฟเวอร์", "1-3 นาที"),
+    "SSL/TLS / ตรวจ SSL/TLS": ("ตรวจใบรับรอง โปรโตคอลเก่า (SSLv3/TLS1.0) cipher อ่อน และช่องโหว่ TLS "
+                               "พร้อมให้เกรด A-F", "1-5 นาที"),
+    "HTTP Headers / ตรวจ Header": ("ตรวจเฉพาะ security header เช่น HSTS CSP X-Frame-Options, banner ที่บอกเวอร์ชัน, "
+                                   "cookie flag ใช้เวลาน้อยมาก", "< 1 นาที"),
+    "KEV / ช่องโหว่ที่ถูกโจมตีจริง": ("หาช่องโหว่ CVE ที่อยู่ในรายการ CISA KEV (มีการโจมตีจริงแล้ว) ควรแก้ก่อนเป็นอันดับแรก "
+                                      "ส่งคำขอโจมตีจริงไปยังเป้าหมาย", "10-60 นาที"),
+    "WordPress / ตรวจ WordPress": ("เว็บที่ใช้ WordPress: หาปลั๊กอิน/ธีมที่มีช่องโหว่ ไฟล์สำคัญที่เปิดเผย", "10-40 นาที"),
+    "Full Scan / ตรวจเต็ม": ("ตรวจทุกอย่างที่มี รวมชุดที่ยิงช่องโหว่จริง ใช้เมื่อได้รับอนุมัติให้ทดสอบเต็มรูปแบบ "
+                             "และนัดช่วงเวลากับเจ้าของระบบแล้ว", "1 ชั่วโมงขึ้นไป"),
+}
+
+
+def preset_details(p):
+    """Plain-language explanation of a preset for the New Scan screen."""
+    cats, sevs, tags, desc, mods = PRESETS[p]
+    when, dur = PRESET_HELP[p]
+    intrusive = desc.startswith("INTRUSIVE")
+    lines = [f"ใช้เมื่อ / When:  {when}",
+             "ผลกระทบ / Impact:  " + ("⚠ INTRUSIVE — ส่งคำขอทดสอบช่องโหว่จริง อาจทำให้ระบบช้าหรือล่ม ต้องให้หัวหน้าอนุมัติ"
+                                     if intrusive else "ปลอดภัย — อ่านอย่างเดียว ไม่พยายามเจาะระบบ")
+             + f"      ·  เวลา / Time:  {dur} ต่อเป้าหมาย",
+             "ชุดตรวจ nuclei / Checks:  " + (", ".join(TH[c] for c in cats) if cats else "ไม่ใช้ nuclei")
+             + (f"  (กรองแท็ก: {tags})" if tags else ""),
+             "โมดูลเสริม / Modules:  " + (", ".join(MODULES[m] for m in MODULES if m in mods) or "-")
+             + "      ·  รายงานระดับ / Severities:  " + ", ".join(SEV_TH[s] for s in reversed(SEVS) if s in sevs)]
+    return "\n".join(lines)
 
 
 def build_cmd(target_file, cats, sevs, tags, rate, outdir):
@@ -862,29 +900,52 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("VA Scanner")
-        self.geometry("1200x820")
+        self.geometry("1200x900")
         self.proc = None
         self.running_dir = None   # report folder of the scan in progress
         self.shown_dir = None     # report folder shown in Results
         self.host_filter = None
         self.rows = []
+        try:  # Windows 11 look; falls back to plain ttk when sv-ttk is not installed
+            import sv_ttk; sv_ttk.set_theme("light")
+        except Exception:
+            pass
         style = ttk.Style(self)
-        style.configure("Treeview", rowheight=24)
+        style.configure("Treeview", rowheight=28)
         style.configure("TNotebook.Tab", padding=(14, 6))
+        style.configure("Hint.TLabel", foreground="#6b7280")
 
-        self.tabs = ttk.Notebook(self); self.tabs.pack(fill="both", expand=True, padx=6, pady=6)
+        # status bar: what is running + elapsed time, with a busy indicator
+        sbar = ttk.Frame(self, padding=(10, 4)); sbar.pack(side="bottom", fill="x")
+        self.status = ttk.Label(sbar, text="Ready / พร้อมใช้งาน", style="Hint.TLabel"); self.status.pack(side="left")
+        self.prog = ttk.Progressbar(sbar, mode="indeterminate", length=160)
+        ttk.Label(sbar, text="Ctrl+N new · Ctrl+Enter launch · Ctrl+F search · F5 refresh",
+                  style="Hint.TLabel").pack(side="right")
+        self.tabs = ttk.Notebook(self); self.tabs.pack(fill="both", expand=True, padx=8, pady=(8, 0))
         self.build_scans_tab()
         self.build_new_tab()
         self.build_results_tab()
         self.refresh_scans()
         self.after(300, self.first_run)
         self.after(3000, self.tick)
+        self.bind_all("<Control-n>", lambda e: (self.tabs.select(1), self.targets.focus_set()))
+        self.bind_all("<Control-Return>", lambda e: self.run() if self.tabs.index("current") == 1 else None)
+        self.bind_all("<Control-f>", lambda e: (self.tabs.select(2), self.sub.select(0), self.search.focus_set()))
+        self.bind_all("<F5>", lambda e: (self.refresh_scans(), self.shown_dir and self.show_results(self.shown_dir)))
+
+    @staticmethod
+    def scroll(tv):
+        """Vertical scrollbar for a Treeview that sits alone in its own frame."""
+        sb = ttk.Scrollbar(tv.master, orient="vertical", command=tv.yview); tv.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y"); tv.pack(side="left", fill="both", expand=True)
+        return tv
 
     # ---------- My Scans ----------
     def build_scans_tab(self):
         t = ttk.Frame(self.tabs, padding=8); self.tabs.add(t, text="  My Scans / สแกนของฉัน  ")
         bar = ttk.Frame(t); bar.pack(fill="x", pady=(0, 6))
-        ttk.Button(bar, text="+ New Scan / สร้างสแกนใหม่", command=lambda: self.tabs.select(1)).pack(side="left")
+        ttk.Button(bar, text="+ New Scan / สร้างสแกนใหม่", style="Accent.TButton",
+                   command=lambda: self.tabs.select(1)).pack(side="left")
         ttk.Button(bar, text="View results / ดูผล", command=self.open_selected).pack(side="left", padx=4)
         ttk.Button(bar, text="HTML report / รายงาน", command=self.open_html).pack(side="left", padx=4)
         ttk.Button(bar, text="Re-run / สแกนซ้ำ", command=self.rerun).pack(side="left", padx=4)
@@ -892,14 +953,16 @@ class App(tk.Tk):
                                                                           os.startfile(REPORTS))).pack(side="left", padx=4)
         ttk.Button(bar, text="Update templates / อัปเดตเทมเพลต", command=self.update_templates).pack(side="right")
         cols = ("name", "template", "targets", "date", "status") + tuple(reversed(SEVS))
-        self.scans = ttk.Treeview(t, columns=cols, show="headings", selectmode="browse")
+        self.scans = ttk.Treeview(ttk.Frame(t), columns=cols, show="headings", selectmode="browse")
         heads = {"name": "Name / ชื่อ", "template": "Template / รูปแบบ", "targets": "Targets / เป้าหมาย",
                  "date": "Date / วันที่", "status": "Status / สถานะ"}
         widths = {"name": 210, "template": 180, "targets": 230, "date": 120, "status": 90}
         for c in cols:
             self.scans.heading(c, text=heads.get(c, c.title()))
             self.scans.column(c, width=widths.get(c, 62), anchor="w" if c in widths else "center")
-        self.scans.pack(fill="both", expand=True)
+        ttk.Label(t, text="ดับเบิลคลิกเพื่อดูผล / Double-click a scan to open its results",
+                  style="Hint.TLabel").pack(side="bottom", anchor="w", pady=(4, 0))
+        self.scans.master.pack(fill="both", expand=True); self.scroll(self.scans)
         self.scans.bind("<Double-1>", lambda e: self.open_selected())
         self.scans.tag_configure("running", foreground="#1976d2")
         self.scans.tag_configure("failed", foreground="#d32f2f")
@@ -969,28 +1032,40 @@ class App(tk.Tk):
     # ---------- New Scan ----------
     def build_new_tab(self):
         t = ttk.Frame(self.tabs, padding=12); self.tabs.add(t, text="  New Scan / สร้างสแกนใหม่  ")
+        ttk.Label(t, text="①  Targets / ใส่เป้าหมาย", font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(0, 4))
         f = ttk.Frame(t); f.pack(fill="x")
         ttk.Label(f, text="Scan name / ชื่องานสแกน").grid(row=0, column=0, sticky="w")
         self.name = ttk.Entry(f, width=50); self.name.grid(row=0, column=1, sticky="w", pady=2)
         ttk.Label(f, text="Targets / เป้าหมาย\n(1 บรรทัดต่อ 1 URL หรือ IP)").grid(row=1, column=0, sticky="nw")
         self.targets = tk.Text(f, width=80, height=5); self.targets.grid(row=1, column=1, sticky="we", pady=2)
 
-        ttk.Label(t, text="Scan template / เลือกรูปแบบการสแกน", font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(12, 4))
+        ttk.Label(t, text="②  Choose what to check / เลือกรูปแบบการสแกน  (เลือกอย่างเดียวพอ — ระบบตั้งค่าที่เหลือให้)",
+                  font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(12, 4))
         cards = ttk.Frame(t); cards.pack(fill="x")
         self.preset = tk.StringVar(value=DEFAULT_PRESET)
         for i, (p, (_, _, _, desc, _)) in enumerate(PRESETS.items()):
             danger = desc.startswith("INTRUSIVE")
-            tk.Radiobutton(cards, text=f"{p}\n{desc}", variable=self.preset, value=p, indicatoron=0,
-                           command=self.apply_preset, width=34, height=3, wraplength=250, justify="left",
-                           anchor="w", padx=8, relief="ridge", bd=2, selectcolor="#ffe0e0" if danger else "#dceeff",
-                           fg="#b71c1c" if danger else "#222", font=("Segoe UI", 9)).grid(
-                row=i // 4, column=i % 4, padx=4, pady=4, sticky="we")
+            text = ("⚠ " if danger else "") + p + "\n" + textwrap.fill(desc, 42, max_lines=2, placeholder="…")
+            ttk.Radiobutton(cards, text=text, variable=self.preset, value=p, command=self.apply_preset,
+                            style="Toggle.TButton").grid(row=i // 4, column=i % 4, padx=4, pady=4, sticky="nsew")
+        for c in range(4):
+            cards.columnconfigure(c, weight=1, uniform="card")
+        info = ttk.LabelFrame(t, text="What this scan does / สิ่งที่จะตรวจ", padding=(10, 6))
+        info.pack(fill="x", pady=(6, 0))
+        self.preset_info = ttk.Label(info, justify="left", wraplength=1100)
+        self.preset_info.pack(anchor="w", fill="x")
+        info.bind("<Configure>", lambda e: self.preset_info.config(wraplength=max(e.width - 30, 300)))
 
-        self.adv_shown = tk.BooleanVar(value=False)
-        ttk.Checkbutton(t, text="Show advanced settings / ตั้งค่าขั้นสูง", variable=self.adv_shown,
-                        command=self.toggle_adv).pack(anchor="w", pady=(10, 0))
-        self.adv = ttk.LabelFrame(t, text="Advanced / ขั้นสูง", padding=8)
-        a = self.adv
+        ttk.Button(t, text="⚙  Customize… / ปรับแต่งเอง  (ไม่จำเป็น — ไม่ต้องแตะก็สแกนได้)",
+                   command=self.show_adv).pack(anchor="w", pady=(8, 0))
+        # Customize lives in its own window so the New Scan screen always fits
+        self.adv_win = tk.Toplevel(self); self.adv_win.withdraw(); self.adv_win.transient(self)
+        self.adv_win.title("Customize / ปรับแต่ง"); self.adv_win.protocol("WM_DELETE_WINDOW", self.adv_win.withdraw)
+        ttk.Button(self.adv_win, text="Done / เสร็จ", style="Accent.TButton",
+                   command=self.adv_win.withdraw).pack(side="bottom", anchor="e", padx=10, pady=(0, 10))
+        self.adv = ttk.LabelFrame(self.adv_win, text="Customize / ปรับแต่ง  ·  ค่าทั้งหมดถูกตั้งตามรูปแบบที่เลือกในข้อ ② แล้ว "
+                                          "แก้เฉพาะเมื่อต้องการ", padding=8)
+        a = self.adv; a.pack(fill="both", expand=True, padx=10, pady=10)
         ttk.Label(a, text="Templates / ชุดการตรวจ").grid(row=0, column=0, sticky="nw")
         self.cat_vars = {c: tk.BooleanVar() for c in CATS}
         for i, c in enumerate(CATS):
@@ -1007,10 +1082,10 @@ class App(tk.Tk):
         ttk.Label(a, text="Rate / ความเร็ว (ครั้ง/วินาที)").grid(row=r + 1, column=2, sticky="e")
         self.rate = ttk.Spinbox(a, from_=1, to=150, width=6); self.rate.set(20); self.rate.grid(row=r + 1, column=3, sticky="w")
 
-        self.bottom = ttk.Frame(t); self.bottom.pack(fill="x", pady=10)
-        mf = ttk.LabelFrame(self.bottom, text="Modules / โมดูล (เลือกรันแยกกันได้)", padding=6); mf.pack(fill="x", pady=(0, 6))
+        mf = ttk.LabelFrame(a, text="Scanners to run / เครื่องมือที่จะรัน", padding=6)
+        mf.grid(row=r + 2, column=0, columnspan=5, sticky="we", pady=(8, 0))
         self.use_nuclei = tk.BooleanVar()
-        ttk.Checkbutton(mf, variable=self.use_nuclei, text="Nuclei templates / ชุดตรวจ nuclei (ตาม template ด้านบน)").grid(
+        ttk.Checkbutton(mf, variable=self.use_nuclei, text="nuclei / ใช้ชุดตรวจที่ติ๊กไว้ด้านบน").grid(
             row=0, column=0, columnspan=3, sticky="w")
         self.mod_vars = {k: tk.BooleanVar() for k in MODULES}
         texts = {"ports": "Port scan / สแกนพอร์ต TCP + banner  ·  พอร์ต:",
@@ -1020,21 +1095,22 @@ class App(tk.Tk):
             ttk.Checkbutton(mf, variable=self.mod_vars[k], text=texts[k]).grid(row=i, column=0, sticky="w")
         self.port_spec = ttk.Entry(mf, width=28); self.port_spec.insert(0, "top"); self.port_spec.grid(row=1, column=1, sticky="w")
         ttk.Label(mf, text="top / all / 1-1024,3389", foreground="#666").grid(row=1, column=2, sticky="w", padx=6)
+        self.bottom = ttk.Frame(t); self.bottom.pack(fill="x", pady=(10, 0))
+        ttk.Label(self.bottom, text="③  Confirm & launch / ยืนยันและเริ่มสแกน", font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(0, 4))
         self.auth = tk.BooleanVar()
         ttk.Checkbutton(self.bottom, text="I have written authorization / ได้รับอนุญาตเป็นลายลักษณ์อักษรให้ทดสอบเป้าหมายนี้แล้ว",
                         variable=self.auth).pack(anchor="w")
-        self.run_btn = ttk.Button(self.bottom, text="▶  Launch scan / เริ่มสแกน", command=self.run)
+        self.run_btn = ttk.Button(self.bottom, text="▶  Launch scan / เริ่มสแกน  (Ctrl+Enter)", style="Accent.TButton",
+                                  command=self.run)
         self.run_btn.pack(anchor="w", pady=6, ipadx=10, ipady=4)
         self.apply_preset()
 
-    def toggle_adv(self):
-        if self.adv_shown.get():
-            self.adv.pack(fill="x", before=self.bottom)
-        else:
-            self.adv.pack_forget()
+    def show_adv(self):
+        self.adv_win.deiconify(); self.adv_win.lift(); self.adv_win.focus_set()
 
     def apply_preset(self):
         cats, sevs, tags, _, mods = PRESETS[self.preset.get()]
+        self.preset_info.config(text=preset_details(self.preset.get()))
         self.use_nuclei.set(bool(cats))
         for k, v in self.mod_vars.items(): v.set(k in mods)
         self.tags.delete(0, "end"); self.tags.insert(0, tags)
@@ -1094,12 +1170,19 @@ class App(tk.Tk):
             self.chip[s] = tk.Label(chips, text="", bg=SEV_COLOR[s], fg="white", width=14, height=2,
                                     font=("Segoe UI", 10, "bold"))
             self.chip[s].pack(side="left", padx=3)
+        # sv-ttk runs tk_setPalette on every <<ThemeChanged>>, which repaints all tk widgets; put the chip colours back
+        self.bind_all("<<ThemeChanged>>", lambda e: e.widget is self and self.after_idle(
+            lambda: [c.config(bg=SEV_COLOR[s], fg="white") for s, c in self.chip.items()]), add="+")
         self.filter_lbl = ttk.Label(chips, text=""); self.filter_lbl.pack(side="left", padx=10)
+        self.search_var = tk.StringVar()
+        self.search = ttk.Entry(chips, textvariable=self.search_var, width=28); self.search.pack(side="right")
+        ttk.Label(chips, text="🔍 Search / ค้นหา").pack(side="right", padx=4)
+        self.search_var.trace_add("write", lambda *_: self.shown_dir and self.show_results(self.shown_dir))
 
         self.sub = ttk.Notebook(t); self.sub.pack(fill="both", expand=True)
         # Vulnerabilities: grouped list + detail pane
         pv = ttk.PanedWindow(self.sub, orient="horizontal"); self.sub.add(pv, text=" Vulnerabilities / ช่องโหว่ ")
-        self.vulns = ttk.Treeview(pv, columns=("sev", "name", "count"), show="tree headings", selectmode="browse")
+        self.vulns = ttk.Treeview(ttk.Frame(pv), columns=("sev", "name", "count"), show="tree headings", selectmode="browse")
         for c, txt, w in (("sev", "Severity", 90), ("name", "Name / ชื่อช่องโหว่", 420), ("count", "Count", 60)):
             self.vulns.heading(c, text=txt); self.vulns.column(c, width=w, anchor="w" if c == "name" else "center")
         self.vulns.column("#0", width=24, stretch=False)
@@ -1107,16 +1190,17 @@ class App(tk.Tk):
             self.vulns.tag_configure(s, foreground=SEV_COLOR[s])
         self.vulns.bind("<<TreeviewSelect>>", self.show_detail)
         self.detail = scrolledtext.ScrolledText(pv, wrap="word", font=("Segoe UI", 10))
-        pv.add(self.vulns, weight=3); pv.add(self.detail, weight=2)
+        pv.add(self.vulns.master, weight=3); pv.add(self.detail, weight=2); self.scroll(self.vulns)
         # Hosts: per-host severity counts, double-click to drill into that host's vulns
         hf = ttk.Frame(self.sub); self.sub.add(hf, text=" Hosts / เครื่องเป้าหมาย ")
         self.hosts = ttk.Treeview(hf, columns=("host",) + tuple(reversed(SEVS)), show="headings")
         self.hosts.heading("host", text="Host"); self.hosts.column("host", width=400)
         for s in reversed(SEVS):
             self.hosts.heading(s, text=s.title()); self.hosts.column(s, width=80, anchor="center")
-        self.hosts.pack(fill="both", expand=True)
         self.hosts.bind("<Double-1>", self.drill_host)
-        ttk.Label(hf, text="ดับเบิลคลิกที่ host เพื่อดูช่องโหว่ของเครื่องนั้น / Double-click a host to see its vulnerabilities").pack(anchor="w")
+        ttk.Label(hf, text="ดับเบิลคลิกที่ host เพื่อดูช่องโหว่ของเครื่องนั้น / Double-click a host to see its vulnerabilities",
+                  style="Hint.TLabel").pack(side="bottom", anchor="w")
+        self.scroll(self.hosts)
         # Ports: one row per open port, risky services coloured by severity
         pf = ttk.Frame(self.sub); self.sub.add(pf, text=" Ports / พอร์ต ")
         cols = (("host", "Host", 170), ("port", "Port", 60), ("service", "Service", 110), ("risk", "Risk / ความเสี่ยง", 90),
@@ -1126,8 +1210,8 @@ class App(tk.Tk):
             self.portv.heading(cid, text=txt); self.portv.column(cid, width=w, anchor="center" if cid in ("port", "risk") else "w")
         for s in SEVS:
             self.portv.tag_configure(s, foreground=SEV_COLOR[s])
-        self.port_lbl = ttk.Label(pf, text=""); self.port_lbl.pack(anchor="w")
-        self.portv.pack(fill="both", expand=True)
+        self.port_lbl = ttk.Label(pf, text=""); self.port_lbl.pack(side="top", anchor="w")
+        self.scroll(self.portv)
         # SSL/TLS: testssl-style table, host -> section -> check rows
         self.tlsv = self.check_tree(" SSL/TLS ")
         # Ciphers: every accepted cipher suite, sortable (like testssl -E)
@@ -1189,6 +1273,10 @@ class App(tk.Tk):
         for s in SEVS:
             self.chip[s].config(text=f"{c[s]}\n{s.upper()} / {SEV_TH[s]}")
         rows = [r for r in self.rows if r.get("host") == self.host_filter] if self.host_filter else self.rows
+        q = self.search_var.get().strip().lower()
+        if q:  # match name, template id, host or URL
+            rows = [r for r in rows if q in " ".join((r.get("info", {}).get("name", ""), r.get("template-id", ""),
+                                                      r.get("host", ""), r.get("matched-at", ""))).lower()]
         self.filter_lbl.config(text=f"Filter host: {self.host_filter}   (ดับเบิลคลิก host อื่น หรือเลือกสแกนใหม่เพื่อล้าง)"
                                if self.host_filter else "")
         sel = self.vulns.selection()
@@ -1214,15 +1302,15 @@ class App(tk.Tk):
 
     def check_tree(self, title):
         """testssl-style tree: endpoint -> section -> (check, result, status). Used by SSL/TLS and HTTP Headers."""
-        tv = ttk.Treeview(self.sub, columns=("result", "status"), show="tree headings")
+        tv = ttk.Treeview(ttk.Frame(self.sub), columns=("result", "status"), show="tree headings")
         tv.heading("#0", text="Check / รายการตรวจ"); tv.column("#0", width=330)
         tv.heading("result", text="Result / ผล"); tv.column("result", width=660)
         tv.heading("status", text="Status"); tv.column("status", width=90, anchor="center")
         for st, c in STATUS_COLOR.items():
             tv.tag_configure(st, foreground=c)
         tv.tag_configure("sec", background="#e3e8ec", font=("Segoe UI", 9, "bold"))
-        self.sub.add(tv, text=title)
-        return tv
+        self.sub.add(tv.master, text=title)
+        return self.scroll(tv)
 
     @staticmethod
     def fill_check_tree(tv, tables):
@@ -1284,6 +1372,8 @@ class App(tk.Tk):
     def start(self, cmd, outdir):
         self.log.insert("end", " ".join(cmd) + "\n\n" if cmd else "[nuclei] skipped (no templates selected)\n")
         self.run_btn.state(["disabled"])
+        self.started = time.time()
+        self.prog.pack(side="left", padx=10); self.prog.start(12)
         threading.Thread(target=self._worker, args=(cmd, outdir), daemon=True).start()
 
     def _worker(self, cmd, outdir):
@@ -1329,6 +1419,8 @@ class App(tk.Tk):
 
     def finished(self, outdir, code):
         self.run_btn.state(["!disabled"])
+        self.prog.stop(); self.prog.pack_forget()
+        self.status.config(text=f"Last job finished {time.strftime('%H:%M')} / งานล่าสุดเสร็จแล้ว")
         self.running_dir = None
         if not outdir:
             self.log.insert("end", f"\n[done, exit {code}]\n")
@@ -1347,6 +1439,10 @@ class App(tk.Tk):
         messagebox.showinfo("VA Scanner", f"สแกน '{m.get('name')}' {status}\nพบ {n} รายการ / {n} findings")
 
     def tick(self):  # live refresh while a scan runs
+        if self.running_dir or (self.proc and self.proc.poll() is None):
+            m, s = divmod(int(time.time() - self.started), 60)
+            what = read_meta(self.running_dir).get("name", "") if self.running_dir else "Updating templates"
+            self.status.config(text=f"Running / กำลังทำงาน: {what}  ·  {m:02d}:{s:02d}  ·  {len(self.rows)} findings")
         if self.running_dir:
             self.refresh_scans()
             if self.shown_dir == self.running_dir:
@@ -1383,7 +1479,8 @@ if __name__ == "__main__":
         assert c[:3] == [NUCLEI, "-l", "t.txt"], c
         assert c[-6:] == ["-t", rf"{TPL}\ssl", "-severity", "high", "-tags", "arcgis"], c
         assert all(set(p[0]) <= set(CATS) and p[4] <= set(MODULES) and (p[0] or p[4]) for p in PRESETS.values())
-        assert DEFAULT_PRESET in PRESETS
+        assert DEFAULT_PRESET in PRESETS and PRESET_HELP.keys() == PRESETS.keys()
+        assert all(preset_details(p) for p in PRESETS) and "INTRUSIVE" in preset_details("Full Scan / ตรวจเต็ม")
         assert parse_ports("22,8000-8002") == [22, 8000, 8001, 8002] and 3389 in parse_ports("top")
         assert len(parse_ports("all")) == 65535 and 8081 in parse_ports("top,8081")
         for bad in ("0", "70000", "9-3", "abc"):
