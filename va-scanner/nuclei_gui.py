@@ -1,6 +1,6 @@
 """VA Scanner: a scan-manager GUI around nuclei. Run: python nuclei_gui.py  (self-check: --test)"""
 import html, json, os, shutil, subprocess, sys, textwrap, threading, time, tkinter as tk
-from tkinter import ttk, scrolledtext, messagebox
+from tkinter import ttk, scrolledtext, messagebox, simpledialog
 
 # Portable: everything lives next to the app (VA-Scanner.exe or this .py), so the folder can be copied anywhere.
 BASE = os.path.dirname(sys.executable if getattr(sys, "frozen", False) else os.path.abspath(__file__))
@@ -780,6 +780,72 @@ def group(rows, key):
     return sorted(g.items(), key=lambda kv: (min(rank(sev_of(r)) for r in kv[1]), -len(kv[1]), kv[0]))
 
 
+TRIAGE = {"fp": "✖ False positive / ไม่ใช่ช่องโหว่", "accepted": "⚠ Accepted risk / ยอมรับความเสี่ยง",
+          "fixed": "✔ Fixed / แก้แล้ว"}
+
+
+def short(st):  # "✖ False positive / ไม่ใช่ช่องโหว่" -> "✖ False positive" for narrow table columns
+    return TRIAGE[st].split(" / ")[0] if st else ""
+
+
+def fkey(r):
+    """One finding instance: template + where it matched. Triage marks are stored per instance."""
+    return f'{r.get("template-id", "")}|{r.get("matched-at") or r.get("host", "")}'
+
+
+def load_triage(outdir):
+    try:
+        with open(os.path.join(outdir, "triage.json"), encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return {}
+
+
+def save_triage(outdir, tri):
+    with open(os.path.join(outdir, "triage.json"), "w", encoding="utf-8") as fh:
+        json.dump({k: v for k, v in tri.items() if v}, fh, ensure_ascii=False, indent=1)
+
+
+def active(rows, tri):
+    """Findings minus those marked false positive: what counts, gets reported and gets compared."""
+    return [r for r in rows if tri.get(fkey(r), {}).get("status") != "fp"]
+
+
+def diff_scans(old, new):
+    """Re-test diff on (template, host): (new findings, fixed = gone since old, still open)."""
+    k = lambda r: (r.get("template-id", ""), r.get("host", ""))
+    ok, nk = {k(r) for r in old}, {k(r) for r in new}
+    return [r for r in new if k(r) not in ok], [r for r in old if k(r) not in nk], [r for r in new if k(r) in ok]
+
+
+def make_diff_html(path, old_meta, new_meta, new, fixed, still):
+    e = html.escape
+    def table(rs):
+        if not rs:
+            return "<p>-</p>"
+        trs = "".join(f'<tr><td><span class="sev" style="background:{SEV_COLOR[sev_of(r)]}">{sev_of(r)}</span></td>'
+                      f'<td>{e(r.get("info", {}).get("name", r.get("template-id", "")))}</td>'
+                      f'<td>{e(r.get("matched-at") or r.get("host", ""))}</td></tr>'
+                      for r in sorted(rs, key=lambda r: (rank(sev_of(r)), r.get("template-id", ""))))
+        return f"<table><tr><th>Severity</th><th>Finding</th><th>Where</th></tr>{trs}</table>"
+    page = f"""<!doctype html><html><head><meta charset="utf-8"><title>Re-test Report</title><style>
+body{{font-family:Segoe UI,Tahoma,sans-serif;max-width:1100px;margin:24px auto;padding:0 16px;color:#222}}
+table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ddd;padding:4px 10px;text-align:left;overflow-wrap:anywhere}}
+.sev{{color:#fff;border-radius:4px;padding:2px 8px;font-size:12px;text-transform:uppercase}}
+.cards{{display:flex;gap:10px;margin:16px 0}}.card{{border-left:6px solid;padding:8px 16px;background:#f5f5f5;min-width:120px}}
+.card b{{display:block;font-size:26px}}</style></head><body>
+<h1>Re-test Report / รายงานทดสอบซ้ำ</h1>
+<p>Before / ก่อนแก้: <b>{e(old_meta.get("name", ""))}</b><br>After / หลังแก้: <b>{e(new_meta.get("name", ""))}</b></p>
+<div class="cards"><div class="card" style="border-color:#2e7d32"><b>{len(fixed)}</b>Fixed / แก้แล้ว</div>
+<div class="card" style="border-color:#f57c00"><b>{len(still)}</b>Still open / ยังไม่แก้</div>
+<div class="card" style="border-color:#d32f2f"><b>{len(new)}</b>New / พบใหม่</div></div>
+<h2>Still open / ยังไม่แก้</h2>{table(still)}<h2>New / พบใหม่</h2>{table(new)}<h2>Fixed / แก้แล้ว</h2>{table(fixed)}
+<p><small>Findings marked false positive are excluded. Compared by template and host.</small></p></body></html>"""
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(page)
+    return path
+
+
 def read_meta(outdir):
     try:
         with open(os.path.join(outdir, "scan.json"), encoding="utf-8") as fh:
@@ -797,7 +863,9 @@ def write_meta(outdir, **kw):
 
 def make_html(outdir, targets, name="VA Scan"):
     e = html.escape
-    rows = load_findings(outdir)
+    tri = load_triage(outdir)
+    every = load_findings(outdir)
+    rows = active(every, tri)  # false positives never reach the client report
     cards = "".join(f'<div class="card" style="border-color:{SEV_COLOR[s]}"><b>{n}</b>{s}</div>'
                     for s, n in counts(rows).items())
     host_rows = "".join(f"<tr><td>{e(h)}</td>" + "".join(f"<td>{n or ''}</td>" for n in counts(rs).values()) + "</tr>"
@@ -812,6 +880,9 @@ def make_html(outdir, targets, name="VA Scan"):
         extra = sorted({str(x) for x in rs for x in (x.get("extracted-results") or [])})
         detail = "".join(f"<dt>{k}</dt><dd>{v}</dd>" for k, v in [
             ("Template", e(tid)),
+            ("Status", "<br>".join(sorted({e(f'{x.get("matched-at", x.get("host", ""))}: {TRIAGE[t["status"]]}'
+                                             + (f' ({t["note"]})' if t.get("note") else ""))
+                                           for x in rs for t in [tri.get(fkey(x), {})] if t.get("status")}))),
             ("Affected", "<br>".join(sorted({e(x.get("matched-at", x.get("host", ""))) for x in rs}))),
             ("Description", e(i.get("description", "")).replace("\n", "<br>")),
             ("Remediation", e(i.get("remediation", "")).replace("\n", "<br>")),
@@ -871,7 +942,8 @@ table.ciphers td,table.ciphers td:first-child{{width:auto;white-space:nowrap;fon
 text-align:center;border-radius:8px;padding:4px 10px;margin-right:12px;vertical-align:middle}}
 @media print{{details{{break-inside:avoid}}tr{{break-inside:avoid}}}}</style></head><body>
 <h1>Vulnerability Assessment Report</h1>
-<p><b>{e(name)}</b> &middot; Scan time: {e(os.path.basename(outdir))} &middot; Findings: {len(rows)}</p>
+<p><b>{e(name)}</b> &middot; Scan time: {e(os.path.basename(outdir))} &middot; Findings: {len(rows)}{
+    f" &middot; {len(every) - len(rows)} false positive(s) excluded" if len(every) > len(rows) else ""}</p>
 <p>Targets: {"<br>".join(e(t) for t in targets)}</p>
 <div class="cards">{cards}</div>{hosts}<h2>Vulnerabilities</h2>{body}{ports}{tls}{hdrs}</body></html>"""
     path = os.path.join(outdir, "report.html")
@@ -949,18 +1021,20 @@ class App(tk.Tk):
         ttk.Button(bar, text="View results / ดูผล", command=self.open_selected).pack(side="left", padx=4)
         ttk.Button(bar, text="HTML report / รายงาน", command=self.open_html).pack(side="left", padx=4)
         ttk.Button(bar, text="Re-run / สแกนซ้ำ", command=self.rerun).pack(side="left", padx=4)
+        ttk.Button(bar, text="⇄ Compare / เทียบผล", command=self.compare).pack(side="left", padx=4)
         ttk.Button(bar, text="Open folder / เปิดโฟลเดอร์", command=lambda: (os.makedirs(REPORTS, exist_ok=True),
                                                                           os.startfile(REPORTS))).pack(side="left", padx=4)
         ttk.Button(bar, text="Update nuclei + templates / อัปเดต", command=self.update_templates).pack(side="right")
         cols = ("name", "template", "targets", "date", "status") + tuple(reversed(SEVS))
-        self.scans = ttk.Treeview(ttk.Frame(t), columns=cols, show="headings", selectmode="browse")
+        self.scans = ttk.Treeview(ttk.Frame(t), columns=cols, show="headings", selectmode="extended")
         heads = {"name": "Name / ชื่อ", "template": "Template / รูปแบบ", "targets": "Targets / เป้าหมาย",
                  "date": "Date / วันที่", "status": "Status / สถานะ"}
         widths = {"name": 210, "template": 180, "targets": 230, "date": 120, "status": 90}
         for c in cols:
             self.scans.heading(c, text=heads.get(c, c.title()))
             self.scans.column(c, width=widths.get(c, 62), anchor="w" if c in widths else "center")
-        ttk.Label(t, text="ดับเบิลคลิกเพื่อดูผล / Double-click a scan to open its results",
+        ttk.Label(t, text="ดับเบิลคลิกเพื่อดูผล  ·  เลือก 2 สแกน (Ctrl+คลิก) แล้วกด Compare เพื่อเทียบก่อน/หลังแก้  /  "
+                          "Double-click to open · Ctrl+click two scans, then Compare",
                   style="Hint.TLabel").pack(side="bottom", anchor="w", pady=(4, 0))
         self.scans.master.pack(fill="both", expand=True); self.scroll(self.scans)
         self.scans.bind("<Double-1>", lambda e: self.open_selected())
@@ -977,7 +1051,7 @@ class App(tk.Tk):
             if not os.path.isdir(path):
                 continue
             m = read_meta(path)
-            c = counts(load_findings(path))
+            c = counts(active(load_findings(path), load_triage(path)))
             status = m.get("status", "unknown")
             targets = m.get("targets") or self.targets_file(path)
             self.scans.insert("", "end", iid=path, tags=(status,), values=(
@@ -999,6 +1073,43 @@ class App(tk.Tk):
         if not sel:
             messagebox.showinfo("VA Scanner", "เลือกสแกนในรายการก่อน / Select a scan first.")
         return sel[0] if sel else None
+
+    def compare(self):
+        sel = sorted(self.scans.selection())  # folder names are timestamps: oldest first
+        if len(sel) != 2:
+            return messagebox.showinfo("VA Scanner", "เลือก 2 สแกน (Ctrl+คลิก): สแกนก่อนแก้ และสแกนหลังแก้\n"
+                                                     "Select exactly two scans (Ctrl+click): before and after the fix.")
+        old, new = sel
+        mo, mn = read_meta(old), read_meta(new)
+        # a false positive marked in either scan is dropped from both, or it would show up as "fixed"
+        fps = {k: v for d in sel for k, v in load_triage(d).items() if v.get("status") == "fp"}
+        nw, fx, st = diff_scans(*(active(load_findings(d), fps) for d in sel))
+        win = tk.Toplevel(self); win.title("Compare / เทียบผล"); win.geometry("1000x620"); win.transient(self)
+        top = ttk.Frame(win, padding=10); top.pack(fill="x")
+        ttk.Label(top, text=f"Before / ก่อนแก้:  {mo.get('name', '')}\nAfter / หลังแก้:  {mn.get('name', '')}",
+                  font=("Segoe UI", 10, "bold")).pack(side="left")
+        ttk.Label(top, text=f"✔ Fixed / แก้แล้ว {len(fx)}    ＋ New / พบใหม่ {len(nw)}    ● Still open / ยังไม่แก้ {len(st)}",
+                  font=("Segoe UI", 11, "bold")).pack(side="left", padx=30)
+        if set(mo.get("targets", [])) != set(mn.get("targets", [])):
+            ttk.Label(win, text="⚠ เป้าหมายของสองสแกนไม่ตรงกัน ผลเทียบอาจคลาดเคลื่อน / The two scans have different targets",
+                      foreground="#b71c1c").pack(anchor="w", padx=10)
+        ttk.Button(top, text="HTML re-test report / รายงานทดสอบซ้ำ", style="Accent.TButton", command=lambda: os.startfile(
+            make_diff_html(os.path.join(new, "retest.html"), mo, mn, nw, fx, st))).pack(side="right")
+        tv = ttk.Treeview(ttk.Frame(win), columns=("sev", "name", "where"), show="tree headings")
+        for c, txt, w in (("sev", "Severity", 90), ("name", "Finding / ช่องโหว่", 420), ("where", "Where / จุดที่พบ", 380)):
+            tv.heading(c, text=txt); tv.column(c, width=w, anchor="center" if c == "sev" else "w")
+        tv.column("#0", width=200)
+        for s in SEVS:
+            tv.tag_configure(s, foreground=SEV_COLOR[s])
+        tv.tag_configure("grp", font=("Segoe UI", 10, "bold"))
+        # what changed first; the long still-open list starts collapsed
+        for label, rs, opened in ((f"＋ New / พบใหม่  ({len(nw)})", nw, True), (f"✔ Fixed / แก้แล้ว  ({len(fx)})", fx, True),
+                                  (f"● Still open / ยังไม่แก้  ({len(st)})", st, False)):
+            g = tv.insert("", "end", text=label, open=opened, tags=("grp",))
+            for r in sorted(rs, key=lambda r: (rank(sev_of(r)), r.get("template-id", ""))):
+                tv.insert(g, "end", tags=(sev_of(r),), values=(sev_of(r).upper(), r.get("info", {}).get(
+                    "name", r.get("template-id", "")), r.get("matched-at") or r.get("host", "")))
+        tv.master.pack(fill="both", expand=True, padx=10, pady=(6, 10)); self.scroll(tv)
 
     def open_selected(self):
         d = self.selected_dir()
@@ -1182,13 +1293,26 @@ class App(tk.Tk):
         self.sub = ttk.Notebook(t); self.sub.pack(fill="both", expand=True)
         # Vulnerabilities: grouped list + detail pane
         pv = ttk.PanedWindow(self.sub, orient="horizontal"); self.sub.add(pv, text=" Vulnerabilities / ช่องโหว่ ")
-        self.vulns = ttk.Treeview(ttk.Frame(pv), columns=("sev", "name", "count"), show="tree headings", selectmode="browse")
-        for c, txt, w in (("sev", "Severity", 90), ("name", "Name / ชื่อช่องโหว่", 420), ("count", "Count", 60)):
+        self.vulns = ttk.Treeview(ttk.Frame(pv), columns=("sev", "name", "status", "count"), show="tree headings",
+                                  selectmode="browse")
+        for c, txt, w in (("sev", "Severity", 90), ("name", "Name / ชื่อช่องโหว่", 360), ("status", "Status / สถานะ", 150),
+                          ("count", "Count", 55)):
             self.vulns.heading(c, text=txt); self.vulns.column(c, width=w, anchor="w" if c == "name" else "center")
         self.vulns.column("#0", width=24, stretch=False)
         for s in SEVS:
             self.vulns.tag_configure(s, foreground=SEV_COLOR[s])
         self.vulns.bind("<<TreeviewSelect>>", self.show_detail)
+        self.vmenu = tk.Menu(self, tearoff=0)
+        for st, label in TRIAGE.items():
+            self.vmenu.add_command(label=label, command=lambda st=st: self.set_status(st))
+        self.vmenu.add_command(label="○ Open / ยังเปิดอยู่ (ล้างสถานะ)", command=lambda: self.set_status(None))
+        self.vmenu.add_separator()
+        self.vmenu.add_command(label="✎ Note… / หมายเหตุ…", command=self.set_note)
+        def popup(e):
+            iid = self.vulns.identify_row(e.y)
+            if iid:
+                self.vulns.selection_set(iid); self.vmenu.tk_popup(e.x_root, e.y_root)
+        self.vulns.bind("<Button-3>", popup)
         self.detail = scrolledtext.ScrolledText(pv, wrap="word", font=("Segoe UI", 10))
         pv.add(self.vulns.master, weight=3); pv.add(self.detail, weight=2); self.scroll(self.vulns)
         # Hosts: per-host severity counts, double-click to drill into that host's vulns
@@ -1269,7 +1393,8 @@ class App(tk.Tk):
         m = read_meta(outdir)
         self.res_title.config(text=f"{m.get('name', '')}   [{m.get('status', '')}]")
         self.rows = load_findings(outdir)
-        c = counts(self.rows)
+        self.tri = load_triage(outdir)
+        c = counts(active(self.rows, self.tri))
         for s in SEVS:
             self.chip[s].config(text=f"{c[s]}\n{s.upper()} / {SEV_TH[s]}")
         rows = [r for r in self.rows if r.get("host") == self.host_filter] if self.host_filter else self.rows
@@ -1286,17 +1411,20 @@ class App(tk.Tk):
         for tid, rs in group(rows, lambda r: r.get("template-id", "")):
             s = sev_of(rs[0])
             self.groups[tid] = rs
+            sts = [self.tri.get(fkey(r), {}).get("status") for r in rs]
+            gst = short(sts[0]) if sts[0] and len(set(sts)) == 1 else (
+                f"{len(rs) - sts.count(None)}/{len(rs)} marked" if any(sts) else "")
             self.vulns.insert("", "end", iid=tid, open=tid in open_, tags=(s,),
-                              values=(s.upper(), rs[0].get("info", {}).get("name", tid), len(rs)))
+                              values=(s.upper(), rs[0].get("info", {}).get("name", tid), gst, len(rs)))
             for n, r in enumerate(rs):
                 self.vulns.insert(tid, "end", iid=f"{tid}\x00{n}", tags=(s,),
-                                  values=("", r.get("matched-at", r.get("host", "")), ""))
+                                  values=("", r.get("matched-at", r.get("host", "")), short(sts[n]), ""))
         if sel and self.vulns.exists(sel[0]):
             self.vulns.selection_set(sel[0])
         elif self.vulns.get_children():
             self.vulns.selection_set(self.vulns.get_children()[0])
         self.hosts.delete(*self.hosts.get_children())
-        for h, rs in group(self.rows, lambda r: r.get("host", "")):
+        for h, rs in group(active(self.rows, self.tri), lambda r: r.get("host", "")):
             hc = counts(rs)
             self.hosts.insert("", "end", iid=h or "-", values=(h, *[hc[s] or "" for s in reversed(SEVS)]))
 
@@ -1332,16 +1460,53 @@ class App(tk.Tk):
             self.ciph.move(i, "", n)
         self._csort = None if rev else col
 
-    def show_detail(self, _=None):
+    def selected_findings(self):
         sel = self.vulns.selection()
         if not sel:
-            return
+            return []
         tid, _, n = sel[0].partition("\x00")
         rs = self.groups.get(tid, [])
-        rs = [rs[int(n)]] if n else rs
+        return [rs[int(n)]] if n else rs  # a group row means every instance of that finding
+
+    def show_detail(self, _=None):
+        rs = self.selected_findings()
         self.detail.delete("1.0", "end")
         if rs:
-            self.detail.insert("end", detail_text(rs))
+            marks = sorted({f'{r.get("matched-at", r.get("host", ""))}: {TRIAGE[t["status"]] if t.get("status") else "Open"}'
+                            + (f'  — {t["note"]}' if t.get("note") else "")
+                            for r in rs for t in [self.tri.get(fkey(r), {})] if t})
+            status = ("Status / สถานะ  (คลิกขวาเพื่อเปลี่ยน / right-click to change)\n" + "\n".join(marks) + "\n\n"
+                      if marks else "")
+            self.detail.insert("end", status + detail_text(rs))
+
+    def set_status(self, st):
+        rs = self.selected_findings()
+        for r in rs:
+            t = self.tri.setdefault(fkey(r), {})
+            if st:
+                t["status"] = st
+            else:
+                t.pop("status", None)
+        save_triage(self.shown_dir, self.tri)
+        self.show_results(self.shown_dir); self.refresh_scans()
+
+    def set_note(self):
+        rs = self.selected_findings()
+        if not rs:
+            return
+        old = self.tri.get(fkey(rs[0]), {}).get("note", "")
+        note = simpledialog.askstring("Note / หมายเหตุ", "หมายเหตุ (เช่น เหตุผลที่เป็น false positive)\nNote, e.g. why it is a false "
+                                      "positive:", initialvalue=old, parent=self)
+        if note is None:
+            return
+        for r in rs:
+            t = self.tri.setdefault(fkey(r), {})
+            if note.strip():
+                t["note"] = note.strip()
+            else:
+                t.pop("note", None)
+        save_triage(self.shown_dir, self.tri)
+        self.show_results(self.shown_dir)
 
     def drill_host(self, _=None):
         sel = self.hosts.selection()
@@ -1534,6 +1699,15 @@ if __name__ == "__main__":
         assert "<td>3389</td>" in out and "&lt;x&gt;" in out and "HTTP headers (testssl-style)" in out and "IIS/8.5" in out
         assert "&lt;b&gt;XSS" in out and "<b>XSS" not in out and out.index("Crit") < out.index("XSS") < out.index("Tech")
         assert "No findings" in open(make_html(tempfile.mkdtemp(), []), encoding="utf-8").read()
+        save_triage(d, {fkey(rows[0]): {"status": "fp", "note": "WAF page"}, fkey(rows[2]): {"status": "accepted"}})
+        assert len(active(load_findings(d), load_triage(d))) == 3
+        out = open(make_html(d, ["https://a"]), encoding="utf-8").read()
+        assert "1 false positive(s) excluded" in out and "https://a/1" not in out and "Accepted risk" in out
+        nw, fx, st = diff_scans(rows[:3], rows[1:] + [{"template-id": "n", "host": "https://c"}])
+        assert [r["template-id"] for r in nw] == ["z", "n"] and [r["host"] for r in fx] == ["https://a"] and len(st) == 2
+        dh = open(make_diff_html(os.path.join(d, "retest.html"), {"name": "<a>"}, {"name": "b"}, nw, fx, st),
+                  encoding="utf-8").read()
+        assert "&lt;a&gt;" in dh and "Crit" in dh
         shutil.rmtree(d)
         cs = lambda n, b=128, fs=True: {"name": n, "bits": b, "kx_type": "ECDH" if fs else "", "kx_size": 256 if fs else 0,
                                          "strength": cipher_strength(n, b, False, fs)[0]}
