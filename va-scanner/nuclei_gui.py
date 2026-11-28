@@ -818,29 +818,118 @@ def diff_scans(old, new):
     return [r for r in new if k(r) not in ok], [r for r in old if k(r) not in nk], [r for r in new if k(r) in ok]
 
 
-def make_diff_html(path, old_meta, new_meta, new, fixed, still):
+def finding_ids(groups):
+    """VA-001, VA-002 ... in report order, so a re-test can cite the same IDs as the original reports."""
+    return {tid: f"VA-{n:03d}" for n, (tid, _) in enumerate(groups, 1)}
+
+
+def compare_scans(old, new):
+    """(new, fixed, still, old rows, new rows) for two scan folders. A false positive marked in either scan is
+    dropped from both, or it would show up as "fixed"."""
+    fps = {k: v for d in (old, new) for k, v in load_triage(d).items() if v.get("status") == "fp"}
+    ro, rn = (active(load_findings(d), fps) for d in (old, new))
+    return (*diff_scans(ro, rn), ro, rn)
+
+
+def make_diff_html(path, old, new):
+    """Formal re-test report: what was fixed, what is still open and what is new between two scans."""
     e = html.escape
-    def table(rs):
+    nw, fx, st, ro, rn = compare_scans(old, new)
+    mo, mn, tri = read_meta(old), read_meta(new), load_triage(new)
+    key = lambda r: r.get("template-id", "")
+    ids = [finding_ids(group(active(load_findings(d), load_triage(d)), key)) for d in (old, new)]  # as in report.html
+    co, cn = counts(ro), counts(rn)
+    vuln = lambda rs: [r for r in rs if sev_of(r) != "info"]  # info = technology / version notes, not vulnerabilities
+    fixed, still, fresh = vuln(fx), vuln(st), vuln(nw)
+    base = len(fixed) + len(still)  # vulnerabilities in the initial assessment
+    rate = f"{len(fixed) * 100 // base}%" if base else "-"  # rounded down, never overstated
+    sev = lambda s: f'<span class="sev" style="background:{SEV_COLOR[s]}">{s.upper()}</span>'
+
+    def risk(c):
+        w = next((s for s in reversed(SEVS) if c[s] and s != "info"), None)
+        return (f'<span class="risk" style="background:{SEV_COLOR[w]}">{w.upper()}</span>' if w
+                else '<span class="risk" style="background:#2e7d32">NONE</span>')
+
+    def when(d):
+        try:
+            return time.strftime("%Y-%m-%d %H:%M", time.strptime(os.path.basename(d)[:15], "%Y%m%d-%H%M%S"))
+        except ValueError:
+            return os.path.basename(d)
+
+    def delta(s):
+        n = cn[s] - co[s]
+        return ('<span style="color:#2e7d32;font-weight:700">▼ %d</span>' % -n if n < 0 else
+                '<span style="color:#d32f2f;font-weight:700">▲ %d</span>' % n if n > 0 else "–")
+
+    def table(rs, before, after, with_status):
         if not rs:
             return "<p>-</p>"
-        trs = "".join(f'<tr><td><span class="sev" style="background:{SEV_COLOR[sev_of(r)]}">{sev_of(r)}</span></td>'
-                      f'<td>{e(r.get("info", {}).get("name", r.get("template-id", "")))}</td>'
-                      f'<td>{e(r.get("matched-at") or r.get("host", ""))}</td></tr>'
-                      for r in sorted(rs, key=lambda r: (rank(sev_of(r)), r.get("template-id", ""))))
-        return f"<table><tr><th>Severity</th><th>Finding</th><th>Where</th></tr>{trs}</table>"
-    page = f"""<!doctype html><html><head><meta charset="utf-8"><title>Re-test Report</title><style>
-body{{font-family:Segoe UI,Tahoma,sans-serif;max-width:1100px;margin:24px auto;padding:0 16px;color:#222}}
-table{{border-collapse:collapse;width:100%}}td,th{{border:1px solid #ddd;padding:4px 10px;text-align:left;overflow-wrap:anywhere}}
-.sev{{color:#fff;border-radius:4px;padding:2px 8px;font-size:12px;text-transform:uppercase}}
-.cards{{display:flex;gap:10px;margin:16px 0}}.card{{border-left:6px solid;padding:8px 16px;background:#f5f5f5;min-width:120px}}
-.card b{{display:block;font-size:26px}}</style></head><body>
-<h1>Re-test Report / รายงานทดสอบซ้ำ</h1>
-<p>Before / ก่อนแก้: <b>{e(old_meta.get("name", ""))}</b><br>After / หลังแก้: <b>{e(new_meta.get("name", ""))}</b></p>
-<div class="cards"><div class="card" style="border-color:#2e7d32"><b>{len(fixed)}</b>Fixed / แก้แล้ว</div>
-<div class="card" style="border-color:#f57c00"><b>{len(still)}</b>Still open / ยังไม่แก้</div>
-<div class="card" style="border-color:#d32f2f"><b>{len(new)}</b>New / พบใหม่</div></div>
-<h2>Still open / ยังไม่แก้</h2>{table(still)}<h2>New / พบใหม่</h2>{table(new)}<h2>Fixed / แก้แล้ว</h2>{table(fixed)}
-<p><small>Findings marked false positive are excluded. Compared by template and host.</small></p></body></html>"""
+        out = []
+        for tid, g in group(rs, key):  # one row per finding, all its locations together
+            sts = sorted({short(tri.get(fkey(x), {}).get("status")) or "Open" for x in g})
+            out.append(f'<tr><td>{ids[0].get(tid, "-") if before else "-"}</td><td>{ids[1].get(tid, "-") if after else "-"}</td>'
+                       f'<td>{e(g[0].get("info", {}).get("name", tid))}</td><td>{sev(sev_of(g[0]))}</td>'
+                       f'<td>{"<br>".join(sorted({e(x.get("matched-at") or x.get("host", "")) for x in g}))}</td>'
+                       + (f'<td>{e(", ".join(sts))}</td>' if with_status else "") + "</tr>")
+        return ('<table class="grid"><tr><th>Ref (before)</th><th>Ref (after)</th><th>Finding / ช่องโหว่</th><th>Severity</th>'
+                '<th>Where / จุดที่พบ</th>' + ("<th>Status / สถานะ</th>" if with_status else "") + "</tr>" + "".join(out) + "</table>")
+
+    verdict = ("ช่องโหว่ทุกรายการที่พบในการประเมินครั้งแรกได้รับการแก้ไขแล้ว และไม่พบช่องโหว่ใหม่ "
+               "/ All vulnerabilities from the initial assessment are resolved and no new ones were found." if not still and not fresh else
+               f"ยังมี <b>{len(still)}</b> รายการที่ยังไม่ได้รับการแก้ไข และพบ <b>{len(fresh)}</b> รายการใหม่ "
+               "ควรดำเนินการแก้ไขตามรายการในหัวข้อ 3 แล้วทดสอบซ้ำอีกครั้ง")
+    summary = (f"การทดสอบซ้ำนี้ตรวจสอบผลการแก้ไขโดยเปรียบเทียบกับการประเมินครั้งแรกเมื่อ {when(old)} "
+               f"จากช่องโหว่ระดับ Low ขึ้นไป {base} รายการ แก้ไขแล้ว <b>{len(fixed)}</b> รายการ ({rate}) "
+               f"ยังไม่แก้ไข <b>{len(still)}</b> รายการ และพบใหม่ <b>{len(fresh)}</b> รายการ "
+               f"ระดับความเสี่ยงโดยรวมเปลี่ยนจาก {risk(co)} เป็น {risk(cn)}<br><br>{verdict}")
+    kpis = "".join(f'<div class="kpi" style="border-color:{c}"><b>{n}</b>{t}</div>' for n, t, c in (
+        (len(fixed), "Fixed / แก้ไขแล้ว", "#2e7d32"), (len(still), "Still open / ยังไม่แก้ไข", "#f57c00"),
+        (len(fresh), "New / พบใหม่", "#d32f2f"), (rate, "Remediation rate / อัตราการแก้ไข", "#1f3a5f")))
+    trend = ('<table class="grid"><tr><th>Severity</th><th>Initial assessment / ครั้งแรก</th><th>Re-test / ทดสอบซ้ำ</th>'
+             '<th>Change / เปลี่ยนแปลง</th></tr>' + "".join(
+                 f"<tr><td>{sev(s)} {SEV_TH[s]}</td><td>{co[s]}</td><td>{cn[s]}</td><td>{delta(s)}</td></tr>"
+                 for s in reversed(SEVS)) + "</table>")
+    differ = set(mo.get("targets", [])) != set(mn.get("targets", []))
+    scope = (
+        '<table class="grid"><tr><th></th><th>Name / ชื่องาน</th><th>Date / วันที่</th><th>Profile / รูปแบบการสแกน</th></tr>'
+        + "".join(f"<tr><td><b>{lbl}</b></td><td>{e(m.get('name', ''))}</td><td>{when(d)}</td><td>{e(m.get('preset', '') or '-')}</td></tr>"
+                  for lbl, m, d in (("Initial assessment / ครั้งแรก", mo, old), ("Re-test / ทดสอบซ้ำ", mn, new))) + "</table>"
+        '<h3>Targets / เป้าหมาย</h3><table class="grid"><tr><th>#</th><th>Target</th></tr>' +
+        "".join(f"<tr><td>{n}</td><td>{e(t)}</td></tr>" for n, t in enumerate(mn.get("targets", []), 1)) + "</table>" +
+        ('<p style="color:#b71c1c">⚠ เป้าหมายของสองครั้งไม่ตรงกัน ผลเปรียบเทียบอาจคลาดเคลื่อน / The two assessments covered different '
+         'targets.</p>' if differ else "") +
+        '<h3>Method / วิธีการเปรียบเทียบ</h3><ul>'
+        '<li>เปรียบเทียบผลการสแกนสองครั้งด้วยเครื่องมือเดียวกัน โดยถือว่าช่องโหว่เป็นรายการเดียวกันเมื่อเป็นชุดตรวจเดียวกันบนเครื่องเป้าหมายเดียวกัน</li>'
+        '<li>รายการที่ผู้ประเมินตรวจสอบแล้วว่าไม่ใช่ช่องโหว่ (false positive) ไม่ถูกนำมาเปรียบเทียบ</li>'
+        '<li>รายการระดับ Info (ข้อมูลประกอบ เช่น เทคโนโลยีที่ใช้) ไม่แสดงในรายงานนี้ และไม่นับในอัตราการแก้ไข</li>'
+        '<li>ผลสะท้อนสถานะของระบบ ณ เวลาที่ทดสอบซ้ำเท่านั้น และเป็นการทดสอบด้วยเครื่องมืออัตโนมัติ</li></ul>'
+        '<h3>Status definitions / ความหมายของสถานะ</h3><table class="grid"><tr><th>Status</th><th>Definition / ความหมาย</th></tr>'
+        '<tr><td><b>Fixed</b></td><td>พบในการประเมินครั้งแรก แต่ไม่พบในการทดสอบซ้ำ</td></tr>'
+        '<tr><td><b>Still open</b></td><td>พบทั้งในการประเมินครั้งแรกและการทดสอบซ้ำ</td></tr>'
+        '<tr><td><b>New</b></td><td>ไม่พบในการประเมินครั้งแรก แต่พบในการทดสอบซ้ำ</td></tr></table>')
+    meta_rows = [("Initial assessment / การประเมินครั้งแรก", f"{e(mo.get('name', ''))} · {when(old)}"),
+                 ("Re-test / ทดสอบซ้ำ", f"{e(mn.get('name', ''))} · {when(new)}"),
+                 ("Targets / จำนวนเป้าหมาย", str(len(mn.get("targets", [])))),
+                 ("Remediation rate / อัตราการแก้ไข", f"<b>{rate}</b> ({len(fixed)} / {base})"),
+                 ("Overall risk / ความเสี่ยงโดยรวม", f"{risk(co)} &nbsp;→&nbsp; {risk(cn)}")]
+    extra = (".kpis{display:flex;gap:14px;margin:18px 0}.kpi{flex:1;border:1px solid var(--line);border-left:6px solid;"
+             "padding:10px 16px;font-size:12px}.kpi b{display:block;font-size:28px;line-height:1.2}")
+    page = f"""<!doctype html><html lang="th"><head><meta charset="utf-8"><title>Re-test Report - {e(mn.get("name", ""))}</title><style>
+{report_css("Re-test Report")}{extra}</style></head><body><div class="doc">
+<section class="cover"><div class="classif">CONFIDENTIAL / เอกสารลับ</div><div class="brand">VA SCANNER</div>
+<h1>Re-test Report<span>รายงานผลการทดสอบซ้ำ เพื่อยืนยันการแก้ไขช่องโหว่</span></h1>
+<div class="proj">{e(mn.get("name", ""))}</div><table class="meta">{"".join(f"<tr><td>{k}</td><td>{v}</td></tr>" for k, v in meta_rows)}</table>
+<div class="note">เอกสารนี้มีข้อมูลช่องโหว่ของระบบสารสนเทศ ซึ่งเป็นข้อมูลที่มีความอ่อนไหว ให้เปิดเผยเฉพาะผู้ที่เกี่ยวข้องเท่านั้น<br>
+This document contains sensitive security information. Distribution is restricted to authorized personnel.</div></section>
+<section class="page"><h2>1. Executive Summary / บทสรุปผู้บริหาร</h2><p>{summary}</p><div class="kpis">{kpis}</div>
+<h3>Findings by severity / จำนวนตามระดับความรุนแรง</h3>{trend}</section>
+<section class="page"><h2>2. Scope &amp; Method / ขอบเขตและวิธีการ</h2>{scope}</section>
+<section class="page"><h2>3. Remediation Status / สถานะการแก้ไข</h2>
+<h3>3.1 Still open / ยังไม่ได้รับการแก้ไข ({len(still)})</h3>{table(still, True, True, True)}
+<h3>3.2 New / พบใหม่ ({len(fresh)})</h3>{table(fresh, False, True, True)}
+<h3>3.3 Fixed / แก้ไขแล้ว ({len(fixed)})</h3>{table(fixed, True, False, False)}
+<p><small>Ref (before) / Ref (after) คือรหัส VA-xxx ในรายงานการประเมินครั้งแรกและรายงานทดสอบซ้ำ ใช้อ้างอิงข้ามรายงานได้</small></p></section>
+</div></body></html>"""
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(page)
     return path
@@ -871,6 +960,54 @@ SEV_DEF = {
 }
 
 
+REPORT_CSS = """:root{--ink:#1d2433;--navy:#1f3a5f;--line:#d5dbe3;--soft:#f3f5f8}
+*{box-sizing:border-box}
+body{font-family:"Segoe UI","Leelawadee UI",Tahoma,sans-serif;color:var(--ink);background:#e9ecf0;margin:0;font-size:14px;line-height:1.55}
+.doc{max-width:980px;margin:24px auto;background:#fff;box-shadow:0 2px 12px rgba(0,0,0,.12);padding:56px 64px}
+a{color:#1565c0;text-decoration:none}
+.cover{min-height:1150px;display:flex;flex-direction:column;border-left:10px solid var(--navy);padding:40px 0 0 40px;margin:-56px -64px 0;padding-right:64px}
+.classif{align-self:flex-end;border:2px solid #b71c1c;color:#b71c1c;font-weight:700;padding:4px 14px;letter-spacing:1px}
+.brand{color:var(--navy);font-weight:700;letter-spacing:3px;margin-top:120px}
+.cover h1{font-size:38px;line-height:1.2;color:var(--navy);margin:10px 0 6px}
+.cover h1 span{display:block;font-size:22px;font-weight:400;color:#4a5568}
+.proj{font-size:22px;font-weight:600;margin:28px 0 36px;padding-bottom:16px;border-bottom:1px solid var(--line)}
+table.meta td{border:0;padding:6px 24px 6px 0;text-align:left}table.meta td:first-child{color:#5a6577;width:290px}
+.note{margin-top:auto;color:#5a6577;font-size:12px;border-top:1px solid var(--line);padding:14px 0 40px}
+h2{color:var(--navy);font-size:22px;border-bottom:3px solid var(--navy);padding-bottom:6px;margin:48px 0 16px}
+h3{color:var(--navy);font-size:16px;margin:24px 0 10px}
+.toc li{margin:6px 0;font-size:15px}.toc li.apx{list-style:none;margin-left:-18px}
+table{border-collapse:collapse;width:100%}
+table.grid th,table.tls th{background:var(--navy);color:#fff;font-weight:600;text-align:left}
+table.grid td,table.grid th,table.tls td,table.tls th{border:1px solid var(--line);padding:6px 10px;vertical-align:top}
+table.grid tr:nth-child(even) td{background:var(--soft)}td.l{text-align:left}
+.sev,.st{color:#fff;border-radius:3px;padding:1px 8px;font-size:11px;font-weight:700;letter-spacing:.5px;white-space:nowrap}
+.risk{color:#fff;font-weight:700;padding:3px 14px;border-radius:3px;letter-spacing:1px}
+.chart td{border:0;padding:4px 8px}.chart .lbl{width:110px;font-weight:600}.chart .n{width:50px;font-weight:700;text-align:right}
+.chart .bar div{height:20px;min-width:2px;border-radius:2px}
+.exec{display:grid;grid-template-columns:1fr 360px;gap:28px;align-items:start}
+.finding{border:1px solid var(--line);margin:18px 0;break-inside:avoid}
+.finding h3{margin:0;padding:10px 14px;background:var(--soft);border-left:6px solid;font-size:15px}
+.fid{color:#5a6577;font-weight:600;margin-right:10px}
+table.kv th{width:210px;text-align:left;background:#fafbfc;color:#4a5568;font-weight:600}
+table.kv th,table.kv td{border-top:1px solid var(--line);padding:7px 14px;vertical-align:top;overflow-wrap:anywhere}
+pre{white-space:pre-wrap;background:var(--soft);padding:8px;margin:0;font-size:12px}small{color:#5a6577}
+table.tls{margin-bottom:16px}table.tls td{overflow-wrap:anywhere}table.tls td:first-child{width:230px;overflow-wrap:normal}
+table.tls td:last-child{width:90px;text-align:center}tr.sec td{background:#e3e8ee;font-weight:700;color:var(--navy)}
+table.ciphers td,table.ciphers td:first-child{width:auto;white-space:nowrap;font-size:12px;overflow-wrap:normal}
+.grade{display:inline-block;color:#fff;font-size:26px;font-weight:700;min-width:56px;text-align:center;border-radius:6px;
+padding:2px 10px;margin-right:12px;vertical-align:middle}
+.page{break-before:page}
+@page{size:A4;margin:16mm 14mm 18mm;@bottom-left{content:"CONFIDENTIAL · __FOOTER__";font-size:9px;color:#777;font-family:"Segoe UI",Tahoma,sans-serif}
+@bottom-right{content:"Page " counter(page) " / " counter(pages);font-size:9px;color:#777;font-family:"Segoe UI",Tahoma,sans-serif}}
+@page:first{@bottom-left{content:none}@bottom-right{content:none}}
+@media print{body{background:#fff;font-size:12px}.doc{box-shadow:none;margin:0;padding:0;max-width:none}
+.cover{min-height:250mm;margin:0;padding:20mm 0 0 14mm}h2{margin-top:0}tr{break-inside:avoid}a{color:inherit}}"""
+
+
+def report_css(footer):
+    return REPORT_CSS.replace("__FOOTER__", footer)
+
+
 def as_list(v):
     return [] if not v else [v] if isinstance(v, (str, int, float)) else [x for x in v if x]
 
@@ -883,7 +1020,7 @@ def make_html(outdir, targets, name="VA Scan"):
     m = read_meta(outdir)
     c = counts(rows)
     groups = group(rows, lambda r: r.get("template-id", ""))
-    fid = {tid: f"VA-{n:03d}" for n, (tid, _) in enumerate(groups, 1)}
+    fid = finding_ids(groups)
     worst = next((s for s in reversed(SEVS) if c[s] and s != "info"), None)
     stamp = os.path.basename(outdir)
     try:
@@ -1029,50 +1166,7 @@ def make_html(outdir, targets, name="VA Scan"):
                  ("Scan profile / รูปแบบการสแกน", e(m.get("preset", "") or "-")),
                  ("Targets / จำนวนเป้าหมาย", str(len(targets))),
                  ("Overall risk / ความเสี่ยงโดยรวม", risk)]
-    page = f"""<!doctype html><html lang="th"><head><meta charset="utf-8"><title>VA Report - {e(name)}</title><style>
-:root{{--ink:#1d2433;--navy:#1f3a5f;--line:#d5dbe3;--soft:#f3f5f8}}
-*{{box-sizing:border-box}}
-body{{font-family:"Segoe UI","Leelawadee UI",Tahoma,sans-serif;color:var(--ink);background:#e9ecf0;margin:0;font-size:14px;line-height:1.55}}
-.doc{{max-width:980px;margin:24px auto;background:#fff;box-shadow:0 2px 12px rgba(0,0,0,.12);padding:56px 64px}}
-a{{color:#1565c0;text-decoration:none}}
-.cover{{min-height:1150px;display:flex;flex-direction:column;border-left:10px solid var(--navy);padding:40px 0 0 40px;margin:-56px -64px 0;padding-right:64px}}
-.classif{{align-self:flex-end;border:2px solid #b71c1c;color:#b71c1c;font-weight:700;padding:4px 14px;letter-spacing:1px}}
-.brand{{color:var(--navy);font-weight:700;letter-spacing:3px;margin-top:120px}}
-.cover h1{{font-size:38px;line-height:1.2;color:var(--navy);margin:10px 0 6px}}
-.cover h1 span{{display:block;font-size:22px;font-weight:400;color:#4a5568}}
-.proj{{font-size:22px;font-weight:600;margin:28px 0 36px;padding-bottom:16px;border-bottom:1px solid var(--line)}}
-table.meta td{{border:0;padding:6px 24px 6px 0;text-align:left}}table.meta td:first-child{{color:#5a6577;width:290px}}
-.note{{margin-top:auto;color:#5a6577;font-size:12px;border-top:1px solid var(--line);padding:14px 0 40px}}
-h2{{color:var(--navy);font-size:22px;border-bottom:3px solid var(--navy);padding-bottom:6px;margin:48px 0 16px}}
-h3{{color:var(--navy);font-size:16px;margin:24px 0 10px}}
-.toc li{{margin:6px 0;font-size:15px}}.toc li.apx{{list-style:none;margin-left:-18px}}
-table{{border-collapse:collapse;width:100%}}
-table.grid th,table.tls th{{background:var(--navy);color:#fff;font-weight:600;text-align:left}}
-table.grid td,table.grid th,table.tls td,table.tls th{{border:1px solid var(--line);padding:6px 10px;vertical-align:top}}
-table.grid tr:nth-child(even) td{{background:var(--soft)}}td.l{{text-align:left}}
-.sev,.st{{color:#fff;border-radius:3px;padding:1px 8px;font-size:11px;font-weight:700;letter-spacing:.5px;white-space:nowrap}}
-.risk{{color:#fff;font-weight:700;padding:3px 14px;border-radius:3px;letter-spacing:1px}}
-.chart td{{border:0;padding:4px 8px}}.chart .lbl{{width:110px;font-weight:600}}.chart .n{{width:50px;font-weight:700;text-align:right}}
-.chart .bar div{{height:20px;min-width:2px;border-radius:2px}}
-.exec{{display:grid;grid-template-columns:1fr 360px;gap:28px;align-items:start}}
-.finding{{border:1px solid var(--line);margin:18px 0;break-inside:avoid}}
-.finding h3{{margin:0;padding:10px 14px;background:var(--soft);border-left:6px solid;font-size:15px}}
-.fid{{color:#5a6577;font-weight:600;margin-right:10px}}
-table.kv th{{width:210px;text-align:left;background:#fafbfc;color:#4a5568;font-weight:600}}
-table.kv th,table.kv td{{border-top:1px solid var(--line);padding:7px 14px;vertical-align:top;overflow-wrap:anywhere}}
-pre{{white-space:pre-wrap;background:var(--soft);padding:8px;margin:0;font-size:12px}}small{{color:#5a6577}}
-table.tls{{margin-bottom:16px}}table.tls td{{overflow-wrap:anywhere}}table.tls td:first-child{{width:230px;overflow-wrap:normal}}
-table.tls td:last-child{{width:90px;text-align:center}}tr.sec td{{background:#e3e8ee;font-weight:700;color:var(--navy)}}
-table.ciphers td,table.ciphers td:first-child{{width:auto;white-space:nowrap;font-size:12px;overflow-wrap:normal}}
-.grade{{display:inline-block;color:#fff;font-size:26px;font-weight:700;min-width:56px;text-align:center;border-radius:6px;
-padding:2px 10px;margin-right:12px;vertical-align:middle}}
-.page{{break-before:page}}
-@page{{size:A4;margin:16mm 14mm 18mm;@bottom-left{{content:"CONFIDENTIAL · Vulnerability Assessment Report";font-size:9px;color:#777;font-family:"Segoe UI",Tahoma,sans-serif}}
-@bottom-right{{content:"Page " counter(page) " / " counter(pages);font-size:9px;color:#777;font-family:"Segoe UI",Tahoma,sans-serif}}}}
-@page:first{{@bottom-left{{content:none}}@bottom-right{{content:none}}}}
-@media print{{body{{background:#fff;font-size:12px}}.doc{{box-shadow:none;margin:0;padding:0;max-width:none}}
-.cover{{min-height:250mm;margin:0;padding:20mm 0 0 14mm}}h2{{margin-top:0}}tr{{break-inside:avoid}}a{{color:inherit}}}}
-</style></head><body><div class="doc">
+    page = f"""<!doctype html><html lang="th"><head><meta charset="utf-8"><title>VA Report - {e(name)}</title><style>{report_css("Vulnerability Assessment Report")}</style></head><body><div class="doc">
 <section class="cover"><div class="classif">CONFIDENTIAL / เอกสารลับ</div><div class="brand">VA SCANNER</div>
 <h1>Vulnerability Assessment Report<span>รายงานผลการประเมินช่องโหว่ระบบสารสนเทศ</span></h1>
 <div class="proj">{e(name)}</div><table class="meta">{"".join(f"<tr><td>{k}</td><td>{v}</td></tr>" for k, v in meta_rows)}</table>
@@ -1221,9 +1315,7 @@ class App(tk.Tk):
                                                      "Select exactly two scans (Ctrl+click): before and after the fix.")
         old, new = sel
         mo, mn = read_meta(old), read_meta(new)
-        # a false positive marked in either scan is dropped from both, or it would show up as "fixed"
-        fps = {k: v for d in sel for k, v in load_triage(d).items() if v.get("status") == "fp"}
-        nw, fx, st = diff_scans(*(active(load_findings(d), fps) for d in sel))
+        nw, fx, st, _, _ = compare_scans(old, new)
         win = tk.Toplevel(self); win.title("Compare / เทียบผล"); win.geometry("1000x620"); win.transient(self)
         top = ttk.Frame(win, padding=10); top.pack(fill="x")
         ttk.Label(top, text=f"Before / ก่อนแก้:  {mo.get('name', '')}\nAfter / หลังแก้:  {mn.get('name', '')}",
@@ -1234,7 +1326,7 @@ class App(tk.Tk):
             ttk.Label(win, text="⚠ เป้าหมายของสองสแกนไม่ตรงกัน ผลเทียบอาจคลาดเคลื่อน / The two scans have different targets",
                       foreground="#b71c1c").pack(anchor="w", padx=10)
         ttk.Button(top, text="HTML re-test report / รายงานทดสอบซ้ำ", style="Accent.TButton", command=lambda: os.startfile(
-            make_diff_html(os.path.join(new, "retest.html"), mo, mn, nw, fx, st))).pack(side="right")
+            make_diff_html(os.path.join(new, "retest.html"), old, new))).pack(side="right")
         tv = ttk.Treeview(ttk.Frame(win), columns=("sev", "name", "where"), show="tree headings")
         for c, txt, w in (("sev", "Severity", 90), ("name", "Finding / ช่องโหว่", 420), ("where", "Where / จุดที่พบ", 380)):
             tv.heading(c, text=txt); tv.column(c, width=w, anchor="center" if c == "sev" else "w")
@@ -1845,9 +1937,17 @@ if __name__ == "__main__":
         assert "1 false positive(s) excluded" in out and "https://a/1" not in out and "Accepted risk" in out
         nw, fx, st = diff_scans(rows[:3], rows[1:] + [{"template-id": "n", "host": "https://c"}])
         assert [r["template-id"] for r in nw] == ["z", "n"] and [r["host"] for r in fx] == ["https://a"] and len(st) == 2
-        dh = open(make_diff_html(os.path.join(d, "retest.html"), {"name": "<a>"}, {"name": "b"}, nw, fx, st),
-                  encoding="utf-8").read()
-        assert "&lt;a&gt;" in dh and "Crit" in dh
+        o, n = tempfile.mkdtemp(), tempfile.mkdtemp()  # re-test: x@a fixed, x@b still open, y info unchanged, z and n new
+        for dd, nm, rs_ in ((o, "<a>", rows[:3]), (n, "b", rows[1:] + [{"template-id": "n", "host": "https://c",
+                            "info": {"name": "New one", "severity": "medium"}}])):
+            write_meta(dd, name=nm, targets=["https://a"])
+            open(os.path.join(dd, "findings.jsonl"), "w", encoding="utf-8").write("\n".join(json.dumps(r) for r in rs_))
+        save_triage(n, {fkey(rows[3]): {"status": "accepted"}})
+        dh = open(make_diff_html(os.path.join(n, "retest.html"), o, n), encoding="utf-8").read()
+        assert "&lt;a&gt;" in dh and "Re-test Report" in dh and "<b>50%</b>" in dh, "retest summary"  # 1 fixed of 2
+        assert dh.index("Crit") > dh.index("3.2 New") and "New one" in dh and "Accepted risk" in dh
+        assert "Tech</td>" not in dh and "VA-001" in dh, "info items stay out of the re-test tables"
+        shutil.rmtree(o); shutil.rmtree(n)
         shutil.rmtree(d)
         cs = lambda n, b=128, fs=True: {"name": n, "bits": b, "kx_type": "ECDH" if fs else "", "kx_size": 256 if fs else 0,
                                          "strength": cipher_strength(n, b, False, fs)[0]}
